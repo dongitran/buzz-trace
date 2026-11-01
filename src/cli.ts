@@ -11,7 +11,7 @@ import { ThreadAggregator, AnomalyDetector } from "./engine/index.js";
 import { JsonRenderer, MarkdownRenderer, TerminalRenderer } from "./formatters/index.js";
 import { SpanNode, ThreadTelemetry } from "./models.js";
 
-const VERSION = "0.1.0";
+const VERSION = "0.1.1";
 
 const HELP_TEXT = `
 buzz-trace ${VERSION}
@@ -273,10 +273,4 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
   }
 }
 
-if (process.argv[1] && process.argv[1].endsWith("cli.js")) {
-  main().then((code) => {
-    if (code !== 0) {
-      process.exit(code);
-    }
-  });
-}
+
