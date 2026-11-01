@@ -187,12 +187,10 @@ export class PhoenixClient {
 
     if (rootSpans.length > 0) {
       const uniqueTraceIds = Array.from(new Set(rootSpans.map((s) => s.traceId).filter(Boolean)));
-      const allSpans: SpanNode[] = [];
-      for (const tid of uniqueTraceIds) {
-        const traceSpans = await this.getSpansByTraceId(project, tid);
-        allSpans.push(...traceSpans);
-      }
-      return allSpans;
+      const traceSpansArray = await Promise.all(
+        uniqueTraceIds.map((tid) => this.getSpansByTraceId(project, tid)),
+      );
+      return traceSpansArray.flat();
     }
 
     // 5. Secondary lookup: match in sessions list
@@ -200,14 +198,11 @@ export class PhoenixClient {
       const sessions = await this.listSessions(project, 50);
       const matched = sessions.find((s) => s.session_id === cleanId || s.id === cleanId);
       if (matched && matched.traces) {
-        const allSpans: SpanNode[] = [];
-        for (const tr of matched.traces) {
-          if (tr.trace_id) {
-            const traceSpans = await this.getSpansByTraceId(project, tr.trace_id);
-            allSpans.push(...traceSpans);
-          }
-        }
-        return allSpans;
+        const traceIds = matched.traces.map((tr) => tr.trace_id).filter(Boolean) as string[];
+        const traceSpansArray = await Promise.all(
+          traceIds.map((tid) => this.getSpansByTraceId(project, tid)),
+        );
+        return traceSpansArray.flat();
       }
     } catch {
       // Fallback

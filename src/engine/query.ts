@@ -31,14 +31,23 @@ export class ThreadQueryEngine {
 
     // 3. Filter by failures only
     if (options.failuresOnly) {
-      filteredTurns = filteredTurns.filter((turn) => {
-        const hasTurnError = turn.statusCode !== "OK";
-        const hasToolError = turn.tools.some((tool) => tool.statusCode !== "OK" || Boolean(tool.error));
-        const hasAnomaly = telemetry.anomalies.some(
-          (a) => a.turnIndex === turn.turnIndex && a.severity !== "INFO",
-        );
-        return hasTurnError || hasToolError || hasAnomaly;
-      });
+      filteredTurns = filteredTurns
+        .filter((turn) => {
+          const hasTurnError = turn.statusCode !== "OK";
+          const hasToolError = turn.tools.some((tool) => tool.statusCode !== "OK" || Boolean(tool.error));
+          const hasAnomaly = telemetry.anomalies.some(
+            (a) => a.turnIndex === turn.turnIndex && a.severity !== "INFO",
+          );
+          return hasTurnError || hasToolError || hasAnomaly;
+        })
+        .map((turn) => {
+          // In failures-only mode, prune successful tools so that turns with dozens of tools don't bloat LLM context!
+          const failedTools = turn.tools.filter((tool) => tool.statusCode !== "OK" || Boolean(tool.error));
+          return {
+            ...turn,
+            tools: failedTools.length > 0 ? failedTools : (turn.statusCode !== "OK" ? [] : turn.tools),
+          };
+        });
     }
 
     // 4. Filter by tools

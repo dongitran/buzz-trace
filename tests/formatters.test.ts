@@ -62,6 +62,23 @@ describe("Formatters", () => {
     expect(parsed.turns).toHaveLength(1);
   });
 
+  it("should render compact JSON properly", () => {
+    const renderer = new JsonRenderer();
+    const compactStr = renderer.render(telemetry, { compact: true });
+    const parsed = JSON.parse(compactStr);
+    expect(parsed.thread_id).toBe("test-thread-abc");
+    expect(parsed.filtered_turns).toBe(1);
+    expect(parsed.turns[0].agent).toBe("phoenix-twin");
+  });
+
+  it("should render unindented single-line flat JSON with zero whitespace", () => {
+    const renderer = new JsonRenderer();
+    const flatStr = renderer.render(telemetry, { compact: true, flat: true });
+    expect(flatStr).not.toContain("\n");
+    const parsed = JSON.parse(flatStr);
+    expect(parsed.thread_id).toBe("test-thread-abc");
+  });
+
   it("should render Markdown properly", () => {
     const renderer = new MarkdownRenderer();
     const md = renderer.render(telemetry);

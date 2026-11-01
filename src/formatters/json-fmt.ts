@@ -8,6 +8,7 @@ import { ThreadTelemetry } from "../models.js";
 
 export interface JsonRenderOptions {
   compact?: boolean;
+  flat?: boolean;
   config?: Config;
 }
 
@@ -20,6 +21,7 @@ export class JsonRenderer {
 
   render(telemetry: ThreadTelemetry, options: JsonRenderOptions = {}): string {
     const isCompact = options.compact ?? false;
+    const indent = options.flat || this.indent === 0 ? 0 : 2;
 
     if (isCompact) {
       const compactPayload = {
@@ -63,9 +65,9 @@ export class JsonRenderer {
           };
         }),
       };
-      return JSON.stringify(compactPayload, null, this.indent ? 2 : 0);
+      return JSON.stringify(compactPayload, null, indent);
     }
 
-    return JSON.stringify(telemetry.toJSON(), null, this.indent);
+    return JSON.stringify(telemetry.toJSON(), null, indent);
   }
 }

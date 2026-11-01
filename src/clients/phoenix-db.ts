@@ -25,16 +25,19 @@ export class PhoenixDBClient {
   readonly dbPath: string;
 
   constructor(dbPath: string) {
-    if (!fs.existsSync(dbPath)) {
+    const filePath = dbPath.replace(/^file:/, "").split("?")[0];
+    if (!fs.existsSync(filePath)) {
       throw new Error(`Phoenix SQLite database not found at ${dbPath}`);
     }
-    this.dbPath = dbPath;
+    this.dbPath = filePath;
   }
 
   getSpansForThread(threadId: string): SpanNode[] {
     const cleanId = threadId.trim();
     const db = new DatabaseSync(this.dbPath, { readOnly: true });
     try {
+      db.exec("PRAGMA busy_timeout = 5000;");
+      db.exec("PRAGMA query_only = ON;");
       const query = `
         SELECT 
             t.trace_id,
@@ -123,6 +126,8 @@ export class PhoenixDBClient {
   listSessions(_project = "mobile", limit = 10): PhoenixSession[] {
     const db = new DatabaseSync(this.dbPath, { readOnly: true });
     try {
+      db.exec("PRAGMA busy_timeout = 5000;");
+      db.exec("PRAGMA query_only = ON;");
       const stmt = db.prepare(`
         SELECT 
           coalesce(json_extract(attributes, '$.session.id'), json_extract(attributes, '$.attributes.session.id'), t.trace_id) as session_id,

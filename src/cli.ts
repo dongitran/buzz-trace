@@ -15,7 +15,7 @@ import { ThreadAggregator, AnomalyDetector, ThreadQueryEngine } from "./engine/i
 import { JsonRenderer, MarkdownRenderer, TerminalRenderer } from "./formatters/index.js";
 import { SpanNode, ThreadTelemetry } from "./models.js";
 
-const VERSION = "0.1.5";
+const VERSION = "0.1.6";
 
 const HELP_TEXT = `
 buzz-trace ${VERSION}
@@ -39,6 +39,7 @@ OPTIONS:
   --db <path>           Direct path to Phoenix SQLite database file (mode=ro)
   --json                Output AI-optimized structured JSON
   --compact             Emit token-optimized compact output (<250 tokens for LLM context)
+  --flat                Emit unindented single-line JSON (saves 25-30% token budget)
   --failures, --errors  Filter turns with non-zero exit code, tool errors, or anomalies
   --tools               Filter turns containing tool executions
   --tool <name>         Filter turns invoking a specific tool (e.g. run_command)
@@ -87,6 +88,7 @@ export async function fetchThreadTelemetry(config: Config, threadId: string): Pr
 export interface QueryFlags {
   json?: boolean;
   compact?: boolean;
+  flat?: boolean;
   markdown?: boolean;
   failures?: boolean;
   tools?: boolean;
@@ -116,8 +118,8 @@ export async function runQuery(
   });
 
   if (flags.json) {
-    const renderer = new JsonRenderer();
-    console.log(renderer.render(telemetry, { compact: flags.compact, config }));
+    const renderer = new JsonRenderer(flags.flat ? 0 : 2);
+    console.log(renderer.render(telemetry, { compact: flags.compact, flat: flags.flat, config }));
   } else if (flags.markdown) {
     const renderer = new MarkdownRenderer();
     console.log(renderer.render(telemetry));
@@ -135,15 +137,15 @@ export async function runInspect(
   flags: QueryFlags,
 ): Promise<number> {
   // If query filter flags are passed to inspect, delegate to runQuery
-  if (flags.failures || flags.tools || flags.toolName || flags.agent || flags.last || flags.turn || flags.compact) {
+  if (flags.failures || flags.tools || flags.toolName || flags.agent || flags.last || flags.turn || flags.compact || flags.flat) {
     return runQuery(threadId, config, flags);
   }
 
   const telemetry = await fetchThreadTelemetry(config, threadId);
 
   if (flags.json) {
-    const renderer = new JsonRenderer();
-    console.log(renderer.render(telemetry, { compact: flags.compact, config }));
+    const renderer = new JsonRenderer(flags.flat ? 0 : 2);
+    console.log(renderer.render(telemetry, { compact: flags.compact, flat: flags.flat, config }));
   } else if (flags.markdown) {
     const renderer = new MarkdownRenderer();
     console.log(renderer.render(telemetry));
@@ -158,13 +160,13 @@ export async function runInspect(
 export async function runAnalyze(
   threadId: string,
   config: Config,
-  flags: { json?: boolean; compact?: boolean; markdown?: boolean; noColor?: boolean },
+  flags: { json?: boolean; compact?: boolean; flat?: boolean; markdown?: boolean; noColor?: boolean },
 ): Promise<number> {
   const telemetry = await fetchThreadTelemetry(config, threadId);
 
   if (flags.json) {
-    const renderer = new JsonRenderer();
-    console.log(renderer.render(telemetry, { compact: flags.compact, config }));
+    const renderer = new JsonRenderer(flags.flat ? 0 : 2);
+    console.log(renderer.render(telemetry, { compact: flags.compact, flat: flags.flat, config }));
   } else if (flags.markdown) {
     const renderer = new MarkdownRenderer();
     console.log(renderer.render(telemetry));
@@ -401,6 +403,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     db: { type: "string" as const },
     json: { type: "boolean" as const, default: false },
     compact: { type: "boolean" as const, default: false },
+    flat: { type: "boolean" as const, default: false },
     failures: { type: "boolean" as const, default: false },
     errors: { type: "boolean" as const, default: false },
     tools: { type: "boolean" as const, default: false },
@@ -459,6 +462,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
   const queryFlags: QueryFlags = {
     json: values.json,
     compact: values.compact,
+    flat: values.flat,
     markdown: values.markdown,
     failures: values.failures || values.errors,
     tools: values.tools || Boolean(values.tool),
@@ -494,6 +498,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
         return await runAnalyze(targetId, config, {
           json: values.json,
           compact: values.compact,
+          flat: values.flat,
           markdown: values.markdown,
           noColor: values["no-color"],
         });

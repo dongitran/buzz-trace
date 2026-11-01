@@ -17,7 +17,7 @@ Distributed thread observability, AI query engine, and telemetry diagnostic CLI 
    - Always trust `reply_to` causality edges over raw timestamps for turn sequencing and thread DAG topology.
 3. **Token-Budgeted Context Protection**:
    - Never load raw full-thread timelines into an LLM agent context window.
-   - Always use `--compact --json` combined with filters (`--last 1`, `--failures`, `--turn N`) to keep query payloads under 200 tokens.
+   - Always use `--compact --json` (add `--flat` for single-line zero-whitespace JSON) combined with filters (`--last 1`, `--failures`, `--turn N`) to keep query payloads under 200 tokens.
 
 ---
 
@@ -26,6 +26,7 @@ Distributed thread observability, AI query engine, and telemetry diagnostic CLI 
 | Task | Command | Typical Tokens |
 |---|---|---|
 | Check if any turn failed | `buzz-trace query <thread_id> --failures --compact --json` | ~80 tokens |
+| Zero-whitespace minimal health check | `buzz-trace query <thread_id> --failures --compact --json --flat` | ~50 tokens |
 | Get latest turn status & tools | `buzz-trace query <thread_id> --last 1 --compact --json` | ~120 tokens |
 | Inspect specific turn details | `buzz-trace query <thread_id> --turn <N> --tools --compact --json` | ~150 tokens |
 | Filter by specific agent | `buzz-trace query <thread_id> --agent <agent_name> --compact --json` | ~150 tokens |
