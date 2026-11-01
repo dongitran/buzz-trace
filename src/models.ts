@@ -87,6 +87,8 @@ export interface AgentTurn {
   traceId: string;
   agentName: string;
   modelName: string;
+  nostrEventId?: string | null;
+  nostrReplyTo?: string | null;
   startTime?: Date;
   endTime?: Date;
   durationMs: number;
@@ -106,6 +108,8 @@ export interface ThreadTelemetryJSON {
   thread_id: string;
   project: string;
   session_id: string | null;
+  nostr_thread_id?: string | null;
+  nostr_channel_id?: string | null;
   total_turns: number;
   total_tokens: number;
   total_prompt_tokens: number;
@@ -153,6 +157,8 @@ export class ThreadTelemetry {
   threadId: string;
   project: string;
   sessionId: string | null;
+  nostrThreadId?: string | null;
+  nostrChannelId?: string | null;
   totalTurns: number;
   totalTokens: number;
   totalPromptTokens: number;
@@ -168,6 +174,8 @@ export class ThreadTelemetry {
     this.threadId = init.threadId || "";
     this.project = init.project || "mobile";
     this.sessionId = init.sessionId || null;
+    this.nostrThreadId = init.nostrThreadId || null;
+    this.nostrChannelId = init.nostrChannelId || null;
     this.totalTurns = init.totalTurns || 0;
     this.totalTokens = init.totalTokens || 0;
     this.totalPromptTokens = init.totalPromptTokens || 0;
@@ -185,6 +193,8 @@ export class ThreadTelemetry {
       thread_id: this.threadId,
       project: this.project,
       session_id: this.sessionId,
+      nostr_thread_id: this.nostrThreadId || null,
+      nostr_channel_id: this.nostrChannelId || null,
       total_turns: this.totalTurns,
       total_tokens: this.totalTokens,
       total_prompt_tokens: this.totalPromptTokens,
