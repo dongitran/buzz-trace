@@ -2,11 +2,11 @@
 
 [![CI](https://github.com/dongitran/buzz-trace/actions/workflows/ci.yml/badge.svg)](https://github.com/dongitran/buzz-trace/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-[![Python Version](https://img.shields.io/badge/python-3.9%2B-brightgreen.svg)](https://www.python.org/)
+[![Node Version](https://img.shields.io/badge/node-%3E%3D20.0.0-brightgreen.svg)](https://nodejs.org/)
 
 **Distributed Thread Observability & Diagnostic CLI for Multi-Agent Nostr Networks.**
 
-`buzz-trace` bridges the observability gap in decentralized multi-agent architectures. It correlates distributed OpenTelemetry / OpenInference traces emitted by multiple autonomous agents across a single Nostr thread, producing a unified, chronological execution timeline with automated anomaly detection.
+`buzz-trace` bridges the observability gap in decentralized multi-agent architectures. It correlates distributed OpenTelemetry and OpenInference traces emitted by multiple autonomous agents across a single Nostr thread, producing a unified chronological execution timeline with automated anomaly detection.
 
 ---
 
@@ -26,24 +26,23 @@
   * **Terminal**: Clean ANSI color formatting, trees, and badges for human engineers.
   * **AI JSON (`--json`)**: Compact, structured JSON optimized for LLM prompts and autonomous subagents.
   * **Markdown (`--markdown`)**: Ready-to-paste tables and breakdowns for GitLab MRs, GitHub PRs, and incident postmortems.
-* **Zero Heavy Dependencies**: Built entirely with Python's standard library for maximum portability across containerized agent sandboxes.
+* **Zero Runtime Dependencies**: Built entirely with Node.js native standard modules (`fetch`, `node:sqlite`, `node:util`).
 
 ---
 
 ## 🚀 Quick Start
 
-### Installation
+### Run Instantly via `npx` (No Installation Required)
 
 ```bash
-# Clone and install locally
-git clone https://github.com/dongitran/buzz-trace.git
-cd buzz-trace
-pip install -e .
+npx buzz-trace inspect <nostr_thread_root_id>
 ```
 
-Or run directly without installation:
+### Global Installation
+
 ```bash
-python3 -m src.cli --help
+npm install -g buzz-trace
+buzz-trace inspect <nostr_thread_root_id>
 ```
 
 ---
@@ -55,7 +54,7 @@ python3 -m src.cli --help
 # Basic inspection of a Nostr thread root event
 buzz-trace inspect a519f713413dea676f4b1e72c1756869c55299988da5cd11d6e81b49fe35d2f3
 
-# Specify a remote Phoenix server & project
+# Specify remote Phoenix server & project
 buzz-trace inspect a519f713... --endpoint http://solace-phoenix:6006 --project mobile
 ```
 
@@ -73,7 +72,7 @@ buzz-trace inspect a519f713... --json
 
 ### 4. Markdown Report Generation
 ```bash
-# Generate markdown for GitLab MRs / issues
+# Generate markdown for GitLab MRs / GitHub issues
 buzz-trace inspect a519f713... --markdown > incident-report.md
 ```
 
@@ -147,11 +146,26 @@ buzz-trace sessions --project mobile --limit 10
 
 ---
 
-## 🧪 Testing
+## 🧪 Development & Testing
 
-Run unit tests via `pytest`:
 ```bash
-pytest -v
+# Install dependencies
+npm install
+
+# Run TypeScript typecheck
+npm run typecheck
+
+# Run linter
+npm run lint
+
+# Run unit tests
+npm test
+
+# Run tests with coverage
+npm run test:coverage
+
+# Build executable distribution
+npm run build
 ```
 
 ---
