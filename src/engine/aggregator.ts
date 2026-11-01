@@ -269,6 +269,8 @@ export class ThreadAggregator {
           if (parent.startTime && turn.startTime) {
             const parentTime = parent.startTime.getTime();
             const childTime = turn.startTime.getTime();
+            const parentEndTime = parent.endTime ? parent.endTime.getTime() : parentTime;
+
             if (childTime < parentTime) {
               const skewMs = parentTime - childTime;
               clockSkewAnomalies.push({
@@ -282,6 +284,21 @@ export class ThreadAggregator {
                   skewMs,
                   childStartTime: turn.startTime.toISOString(),
                   parentStartTime: parent.startTime.toISOString(),
+                },
+              });
+            } else if (parent.endTime && childTime < parentEndTime - 100) {
+              const overlapMs = parentEndTime - childTime;
+              clockSkewAnomalies.push({
+                type: "CLOCK_SKEW",
+                severity: "WARNING",
+                message: `Causal overlap detected: '${turn.agentName}' started ${overlapMs}ms before '${parent.agentName}' finished executing.`,
+                traceId: turn.traceId,
+                details: {
+                  childAgent: turn.agentName,
+                  parentAgent: parent.agentName,
+                  skewMs: overlapMs,
+                  childStartTime: turn.startTime.toISOString(),
+                  parentEndTime: parent.endTime.toISOString(),
                 },
               });
             }

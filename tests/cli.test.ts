@@ -71,4 +71,30 @@ describe("CLI", () => {
     spyFetch.mockRestore();
     logSpy.mockRestore();
   });
+
+  it("should execute query command with --flat and emit single-line JSON", async () => {
+    const mockSpans = [
+      new SpanNode({
+        span_id: "s1",
+        trace_id: "t-mock",
+        name: "agent_turn",
+        span_kind: "AGENT",
+        status_code: "OK",
+        attributes: { "session.id": "test-flat-id", "agent.name": "phoenix-twin" },
+      }),
+    ];
+
+    const spyFetch = vi.spyOn(PhoenixClient.prototype, "getSpansForThread").mockResolvedValue(mockSpans);
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    const code = await main(["query", "test-flat-id", "--compact", "--json", "--flat"]);
+    expect(code).toBe(0);
+    const output = logSpy.mock.calls[0][0];
+    expect(output).not.toContain("\n");
+    const parsed = JSON.parse(output);
+    expect(parsed.thread_id).toBe("test-flat-id");
+
+    spyFetch.mockRestore();
+    logSpy.mockRestore();
+  });
 });

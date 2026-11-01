@@ -94,4 +94,55 @@ describe("ThreadQueryEngine", () => {
     expect(res.turns[0].turnIndex).toBe(1);
     expect(res.turns[0].agentName).toBe("agent-lead");
   });
+
+  it("prunes successful tools in failuresOnly mode to prevent token bloat", () => {
+    const multiToolSpans = [
+      new SpanNode({
+        span_id: "m1",
+        trace_id: "trace-multi",
+        name: "agent_turn",
+        status_code: "OK",
+        attributes: { "session.id": "thread-multi", "agent.name": "worker" },
+      }),
+      // Successful tool 1
+      new SpanNode({
+        span_id: "t1",
+        trace_id: "trace-multi",
+        parent_id: "m1",
+        name: "tool:read_file",
+        status_code: "OK",
+        attributes: { "tool.name": "read_file" },
+      }),
+      // Failing tool 2
+      new SpanNode({
+        span_id: "t2",
+        trace_id: "trace-multi",
+        parent_id: "m1",
+        name: "tool:run_command",
+        status_code: "ERROR",
+        status_message: "command failed",
+        attributes: { "tool.name": "run_command" },
+      }),
+      // Successful tool 3
+      new SpanNode({
+        span_id: "t3",
+        trace_id: "trace-multi",
+        parent_id: "m1",
+        name: "tool:write_file",
+        status_code: "OK",
+        attributes: { "tool.name": "write_file" },
+      }),
+    ];
+
+    const agg = new ThreadAggregator("thread-multi", "mobile", null, "http://localhost:6006");
+    const multiTelem = agg.aggregate(multiToolSpans);
+    expect(multiTelem.turns[0].tools).toHaveLength(3);
+
+    const filtered = engine.filter(multiTelem, { failuresOnly: true });
+    expect(filtered.turns).toHaveLength(1);
+    // Successful tools (t1, t3) must be pruned, leaving only failing tool (t2)
+    expect(filtered.turns[0].tools).toHaveLength(1);
+    expect(filtered.turns[0].tools[0].name).toBe("run_command");
+    expect(filtered.turns[0].tools[0].statusCode).toBe("ERROR");
+  });
 });
