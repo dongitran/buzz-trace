@@ -97,4 +97,105 @@ describe("CLI", () => {
     spyFetch.mockRestore();
     logSpy.mockRestore();
   });
+
+  it("should auto-infer --json and --compact when only --flat is passed", async () => {
+    const mockSpans = [
+      new SpanNode({
+        span_id: "s1",
+        trace_id: "t-mock",
+        name: "agent_turn",
+        span_kind: "AGENT",
+        status_code: "OK",
+        attributes: { "session.id": "test-flat-auto-id", "agent.name": "phoenix-twin" },
+      }),
+    ];
+
+    const spyFetch = vi.spyOn(PhoenixClient.prototype, "getSpansForThread").mockResolvedValue(mockSpans);
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    // Neither --json nor --compact is explicitly passed
+    const code = await main(["query", "test-flat-auto-id", "--failures", "--flat"]);
+    expect(code).toBe(0);
+    const output = logSpy.mock.calls[0][0];
+    expect(output).not.toContain("\n");
+    const parsed = JSON.parse(output);
+    expect(parsed.thread_id).toBe("test-flat-auto-id");
+    expect(parsed.filtered_turns).toBe(0);
+
+    spyFetch.mockRestore();
+    logSpy.mockRestore();
+  });
+
+  it("should execute diff command with --flat and output structured diff JSON", async () => {
+    const mockSpans = [
+      new SpanNode({
+        span_id: "s1",
+        trace_id: "trace-turn-1",
+        name: "agent_turn",
+        span_kind: "AGENT",
+        status_code: "OK",
+        attributes: { "session.id": "test-diff-thread", "agent.name": "agent-1", "llm.model": "gpt-4" },
+      }),
+      new SpanNode({
+        span_id: "s2",
+        trace_id: "trace-turn-2",
+        name: "agent_turn",
+        span_kind: "AGENT",
+        status_code: "OK",
+        attributes: { "session.id": "test-diff-thread", "agent.name": "agent-2", "llm.model": "claude-3" },
+      }),
+    ];
+
+    const spyFetch = vi.spyOn(PhoenixClient.prototype, "getSpansForThread").mockResolvedValue(mockSpans);
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    const code = await main(["diff", "test-diff-thread#1", "test-diff-thread#2", "--flat"]);
+    expect(code).toBe(0);
+    const output = logSpy.mock.calls[0][0];
+    expect(output).not.toContain("\n");
+
+    const parsed = JSON.parse(output);
+    expect(parsed.diff).toBeDefined();
+    expect(parsed.diff.model.a).toBe("gpt-4");
+    expect(parsed.diff.model.b).toBe("claude-3");
+    expect(parsed.diff.model.changed).toBe(true);
+
+    spyFetch.mockRestore();
+    logSpy.mockRestore();
+  });
+
+  it("should execute context command with --budget and --flat", async () => {
+    const mockSpans = [
+      new SpanNode({
+        span_id: "s1",
+        trace_id: "trace-ctx-1",
+        name: "agent_turn",
+        span_kind: "AGENT",
+        status_code: "OK",
+        attributes: {
+          "session.id": "test-ctx-thread",
+          "agent.name": "phoenix-twin",
+          "input.value": "Explain quantum computing",
+          "output.value": "Quantum computing uses qubits",
+        },
+      }),
+    ];
+
+    const spyFetch = vi.spyOn(PhoenixClient.prototype, "getSpansForThread").mockResolvedValue(mockSpans);
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    const code = await main(["context", "test-ctx-thread", "--budget", "200", "--flat"]);
+    expect(code).toBe(0);
+    const output = logSpy.mock.calls[0][0];
+    expect(output).not.toContain("\n");
+
+    const parsed = JSON.parse(output);
+    expect(parsed.thread_id).toBe("test-ctx-thread");
+    expect(parsed.budget).toBe(200);
+    expect(parsed.actual_tokens).toBeLessThanOrEqual(200);
+    expect(parsed.root_intent).toContain("quantum computing");
+
+    spyFetch.mockRestore();
+    logSpy.mockRestore();
+  });
 });

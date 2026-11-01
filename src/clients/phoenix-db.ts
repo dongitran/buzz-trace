@@ -38,7 +38,33 @@ export class PhoenixDBClient {
     try {
       db.exec("PRAGMA busy_timeout = 5000;");
       db.exec("PRAGMA query_only = ON;");
-      const query = `
+
+      // 1. Identify all trace IDs associated with this thread / session / event via UNION covering index optimization
+      const traceQuery = `
+        SELECT t.id
+        FROM traces t
+        JOIN project_sessions ps ON t.project_session_rowid = ps.id
+        WHERE ps.session_id = ?
+        UNION
+        SELECT t.id
+        FROM traces t
+        WHERE t.trace_id = ?
+        UNION
+        SELECT s.trace_rowid AS id
+        FROM spans s
+        WHERE CAST(json_extract(s.attributes, '$."session"."id"') AS VARCHAR) = ?;
+      `;
+
+      const stmt = db.prepare(traceQuery);
+      const traceRows = stmt.all(cleanId, cleanId, cleanId) as unknown as Array<{ id: number }>;
+
+      if (traceRows.length === 0) {
+        return [];
+      }
+
+      // 2. Fetch all spans (root and child tool/LLM spans) for these traces
+      const placeholders = traceRows.map(() => "?").join(",");
+      const spansQuery = `
         SELECT 
             t.trace_id,
             s.span_id,
@@ -52,48 +78,12 @@ export class PhoenixDBClient {
             s.attributes
         FROM spans s
         JOIN traces t ON s.trace_rowid = t.id
-        WHERE json_extract(s.attributes, '$.session.id') = ?
-           OR json_extract(s.attributes, '$.attributes.session.id') = ?
-           OR json_extract(s.attributes, '$.nostr.thread_id') = ?
-           OR json_extract(s.attributes, '$.attributes.nostr.thread_id') = ?
-           OR json_extract(s.attributes, '$.nostr.event_id') = ?
-           OR json_extract(s.attributes, '$.attributes.nostr.event_id') = ?
-           OR t.trace_id = ?
+        WHERE s.trace_rowid IN (${placeholders})
         ORDER BY s.start_time ASC;
       `;
 
-      const stmt = db.prepare(query);
-      let rows = stmt.all(cleanId, cleanId, cleanId, cleanId, cleanId, cleanId, cleanId) as unknown as SpanRow[];
-
-      // If matched a trace or event, check if they belong to a larger session
-      if (rows.length > 0) {
-        for (const r of rows) {
-          if (r.attributes) {
-            try {
-              const parsed = JSON.parse(r.attributes);
-              const sid = (parsed["session.id"] || parsed?.attributes?.["session.id"] || parsed["nostr.thread_id"]) as string | undefined;
-              if (sid && sid !== cleanId) {
-                const sessionStmt = db.prepare(`
-                  SELECT t.trace_id, s.span_id, s.parent_id, s.name, s.span_kind, s.start_time, s.end_time, s.status_code, s.status_message, s.attributes
-                  FROM spans s
-                  JOIN traces t ON s.trace_rowid = t.id
-                  WHERE json_extract(s.attributes, '$.session.id') = ?
-                     OR json_extract(s.attributes, '$.attributes.session.id') = ?
-                     OR json_extract(s.attributes, '$.nostr.thread_id') = ?
-                  ORDER BY s.start_time ASC;
-                `);
-                const sessionRows = sessionStmt.all(sid, sid, sid) as unknown as SpanRow[];
-                if (sessionRows.length > 0) {
-                  rows = sessionRows;
-                  break;
-                }
-              }
-            } catch {
-              // Ignore parse error
-            }
-          }
-        }
-      }
+      const spanStmt = db.prepare(spansQuery);
+      const rows = spanStmt.all(...traceRows.map((r) => r.id)) as unknown as SpanRow[];
 
       return rows.map((row) => {
         let parsedAttrs: Record<string, unknown> = {};

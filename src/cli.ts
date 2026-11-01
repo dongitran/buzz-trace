@@ -11,11 +11,11 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { PhoenixClient, PhoenixDBClient, type PhoenixSession } from "./clients/index.js";
 import { Config, ConfigOptions } from "./config.js";
-import { ThreadAggregator, AnomalyDetector, ThreadQueryEngine } from "./engine/index.js";
+import { ThreadAggregator, AnomalyDetector, ThreadQueryEngine, TraceDiffer, ContextSummarizer } from "./engine/index.js";
 import { JsonRenderer, MarkdownRenderer, TerminalRenderer } from "./formatters/index.js";
 import { SpanNode, ThreadTelemetry } from "./models.js";
 
-const VERSION = "0.1.6";
+const VERSION = "0.1.7";
 
 const HELP_TEXT = `
 buzz-trace ${VERSION}
@@ -27,6 +27,8 @@ USAGE:
 COMMANDS:
   inspect <thread_id>   Inspect telemetry timeline for a Nostr thread ID
   query <thread_id>     Query & filter thread conversation history (for AI self-reflection)
+  diff <trace1> <trace2> Compare two agent turns/traces (models, duration Δ, tokens Δ, tools)
+  context <thread_id>   Adaptive context summarizer prioritizing intent, outcome & failed tools
   analyze <thread_id>   Perform automated diagnostic & anomaly detection on a thread
   sessions              List recent active sessions and thread traces
   watch <thread_id>     Live monitor thread execution in real-time
@@ -37,6 +39,9 @@ OPTIONS:
   --ui-endpoint <url>   Arize Phoenix Web UI base URL (for clickable links)
   --project <name>      Arize Phoenix project name (default: mobile)
   --db <path>           Direct path to Phoenix SQLite database file (mode=ro)
+  --budget <num>        Token budget limit for context command (e.g. 200, 500)
+  --turn1 <num>         First turn index for diff comparison
+  --turn2 <num>         Second turn index for diff comparison
   --json                Output AI-optimized structured JSON
   --compact             Emit token-optimized compact output (<250 tokens for LLM context)
   --flat                Emit unindented single-line JSON (saves 25-30% token budget)
@@ -93,6 +98,7 @@ export interface QueryFlags {
   failures?: boolean;
   tools?: boolean;
   toolName?: string;
+  toolInput?: string;
   agent?: string;
   last?: string;
   turn?: string;
@@ -112,6 +118,7 @@ export async function runQuery(
     failuresOnly: flags.failures,
     toolsOnly: flags.tools,
     toolName: flags.toolName,
+    toolInput: flags.toolInput,
     agentFilter: flags.agent,
     lastN: flags.last ? parseInt(flags.last, 10) : undefined,
     targetTurn: flags.turn ? parseInt(flags.turn, 10) : undefined,
@@ -137,7 +144,7 @@ export async function runInspect(
   flags: QueryFlags,
 ): Promise<number> {
   // If query filter flags are passed to inspect, delegate to runQuery
-  if (flags.failures || flags.tools || flags.toolName || flags.agent || flags.last || flags.turn || flags.compact || flags.flat) {
+  if (flags.failures || flags.tools || flags.toolName || flags.toolInput || flags.agent || flags.last || flags.turn || flags.compact || flags.flat) {
     return runQuery(threadId, config, flags);
   }
 
@@ -178,6 +185,120 @@ export async function runAnalyze(
   const hasCritical = telemetry.anomalies.some((a) => a.severity === "CRITICAL");
   return hasCritical ? 1 : 0;
 }
+
+export interface DiffFlags {
+  json?: boolean;
+  compact?: boolean;
+  flat?: boolean;
+  turn1?: string;
+  turn2?: string;
+  noColor?: boolean;
+}
+
+export function parseTargetSpec(spec: string): { id: string; turnIndex?: number } {
+  const match = spec.match(/^([^#:]+)[#:]([0-9]+)$/);
+  if (match) {
+    return { id: match[1], turnIndex: parseInt(match[2], 10) };
+  }
+  return { id: spec };
+}
+
+export async function runDiff(
+  target1: string | undefined,
+  target2: string | undefined,
+  config: Config,
+  flags: DiffFlags,
+  extraPositional?: string,
+): Promise<number> {
+  if (!target1) {
+    console.error("Error: 'diff' requires at least one target argument.");
+    return 1;
+  }
+
+  let spec1: { id: string; turnIndex?: number };
+  let spec2: { id: string; turnIndex?: number };
+
+  if (extraPositional && target2 && /^\d+$/.test(target2) && /^\d+$/.test(extraPositional)) {
+    // E.g. buzz-trace diff <thread> 1 2
+    spec1 = { id: target1, turnIndex: parseInt(target2, 10) };
+    spec2 = { id: target1, turnIndex: parseInt(extraPositional, 10) };
+  } else if (target2 && /^\d+$/.test(target2)) {
+    // E.g. buzz-trace diff <thread> 2 (comparing turn 1 with turn 2)
+    spec1 = { id: target1, turnIndex: flags.turn1 ? parseInt(flags.turn1, 10) : 1 };
+    spec2 = { id: target1, turnIndex: parseInt(target2, 10) };
+  } else if (target2) {
+    // E.g. buzz-trace diff <target1> <target2>
+    spec1 = parseTargetSpec(target1);
+    spec2 = parseTargetSpec(target2);
+  } else if (flags.turn1 && flags.turn2) {
+    // E.g. buzz-trace diff <thread> --turn1 1 --turn2 2
+    spec1 = { id: target1, turnIndex: parseInt(flags.turn1, 10) };
+    spec2 = { id: target1, turnIndex: parseInt(flags.turn2, 10) };
+  } else {
+    console.error("Error: 'diff' requires two targets to compare (e.g. 'buzz-trace diff <trace1> <trace2>' or 'buzz-trace diff <thread>#1 <thread>#2').");
+    return 1;
+  }
+
+  // Fetch telemetry for spec1
+  const telemetryA = await fetchThreadTelemetry(config, spec1.id);
+  const resolvedA = TraceDiffer.resolveTurnFromTelemetry(telemetryA, target1, spec1.turnIndex);
+
+  // Fetch telemetry for spec2 (reuse telemetryA if same thread)
+  const telemetryB = spec2.id === spec1.id ? telemetryA : await fetchThreadTelemetry(config, spec2.id);
+  const resolvedB = TraceDiffer.resolveTurnFromTelemetry(telemetryB, target2 || target1, spec2.turnIndex);
+
+  const differ = new TraceDiffer();
+  const result = differ.diff(resolvedA.turn, resolvedB.turn, resolvedA.meta, resolvedB.meta);
+
+  if (flags.flat) {
+    console.log(JSON.stringify(result));
+  } else if (flags.json || flags.compact) {
+    console.log(JSON.stringify(result, null, 2));
+  } else {
+    console.log(TraceDiffer.renderTerminal(result, !flags.noColor));
+  }
+
+  return 0;
+}
+
+export interface ContextFlags {
+  budget?: string;
+  flat?: boolean;
+  json?: boolean;
+  compact?: boolean;
+  noColor?: boolean;
+}
+
+export async function runContext(
+  threadId: string | undefined,
+  config: Config,
+  flags: ContextFlags,
+): Promise<number> {
+  if (!threadId) {
+    console.error("Error: 'context' requires a thread_id argument.");
+    return 1;
+  }
+
+  const telemetry = await fetchThreadTelemetry(config, threadId);
+  const budgetNum = flags.budget ? parseInt(flags.budget, 10) : 500;
+
+  const summarizer = new ContextSummarizer();
+  const summary = summarizer.summarize(telemetry, {
+    budget: budgetNum,
+    flat: flags.flat,
+  });
+
+  const isJsonPreferred = flags.json || flags.compact || flags.flat;
+  const rendered = ContextSummarizer.render(summary, {
+    flat: flags.flat,
+    json: isJsonPreferred,
+    noColor: flags.noColor,
+  });
+
+  console.log(rendered);
+  return summary.status === "ERROR" ? 1 : 0;
+}
+
 
 export async function runSessions(config: Config, limit = 10): Promise<number> {
   let sessions: PhoenixSession[] = [];
@@ -408,7 +529,12 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     errors: { type: "boolean" as const, default: false },
     tools: { type: "boolean" as const, default: false },
     tool: { type: "string" as const },
+    "tool-input": { type: "string" as const },
+    cmd: { type: "string" as const },
     agent: { type: "string" as const },
+    budget: { type: "string" as const },
+    turn1: { type: "string" as const },
+    turn2: { type: "string" as const },
     last: { type: "string" as const },
     turn: { type: "string" as const },
     target: { type: "string" as const },
@@ -459,14 +585,18 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
   };
   const config = Config.load(configOptions);
 
+  const isJsonPreferred = values.json || (!values.markdown && Boolean(values.compact || values.flat));
+  const isCompactPreferred = values.compact || Boolean(values.flat);
+
   const queryFlags: QueryFlags = {
-    json: values.json,
-    compact: values.compact,
+    json: isJsonPreferred,
+    compact: isCompactPreferred,
     flat: values.flat,
     markdown: values.markdown,
     failures: values.failures || values.errors,
-    tools: values.tools || Boolean(values.tool),
+    tools: values.tools || Boolean(values.tool) || Boolean(values["tool-input"] || values.cmd),
     toolName: values.tool,
+    toolInput: values["tool-input"] || values.cmd,
     agent: values.agent,
     last: values.last,
     turn: values.turn,
@@ -496,10 +626,42 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
           return 1;
         }
         return await runAnalyze(targetId, config, {
-          json: values.json,
-          compact: values.compact,
+          json: isJsonPreferred,
+          compact: isCompactPreferred,
           flat: values.flat,
           markdown: values.markdown,
+          noColor: values["no-color"],
+        });
+      }
+      case "diff": {
+        const targetA = positionals[1];
+        const targetB = positionals[2];
+        const extraPos = positionals[3];
+        return await runDiff(
+          targetA,
+          targetB,
+          config,
+          {
+            json: isJsonPreferred,
+            compact: isCompactPreferred,
+            flat: values.flat,
+            turn1: values.turn1,
+            turn2: values.turn2,
+            noColor: values["no-color"],
+          },
+          extraPos,
+        );
+      }
+      case "context": {
+        if (!targetId) {
+          console.error("Error: 'context' requires a thread_id argument.");
+          return 1;
+        }
+        return await runContext(targetId, config, {
+          budget: values.budget,
+          flat: values.flat,
+          json: isJsonPreferred,
+          compact: isCompactPreferred,
           noColor: values["no-color"],
         });
       }

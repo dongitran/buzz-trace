@@ -13,6 +13,7 @@ import {
   ThreadTelemetry,
   ToolExecution,
 } from "../models.js";
+import { extractSemanticToolInput } from "../formatters/compact-fmt.js";
 
 export class ThreadAggregator {
   readonly threadId: string;
@@ -53,8 +54,29 @@ export class ThreadAggregator {
       rawTurns.push(this.buildTurn(traceId, traceSpans));
     }
 
+    // 2b. Detect INVALID_DURATION (monotonic clock jumps where start_time > end_time)
+    const invalidDurationAnomalies: Anomaly[] = [];
+    for (const span of spans) {
+      if (span.startTime && span.endTime && span.startTime.getTime() > span.endTime.getTime()) {
+        const negativeMs = span.startTime.getTime() - span.endTime.getTime();
+        invalidDurationAnomalies.push({
+          type: "INVALID_DURATION",
+          severity: "WARNING",
+          message: `Invalid span duration detected: span '${span.name}' has startTime (${span.startTime.toISOString()}) later than endTime (${span.endTime.toISOString()}) by ${negativeMs}ms due to monotonic clock jump.`,
+          traceId: span.traceId,
+          details: {
+            spanId: span.spanId,
+            spanName: span.name,
+            negativeDurationMs: -negativeMs,
+            startTime: span.startTime.toISOString(),
+            endTime: span.endTime.toISOString(),
+          },
+        });
+      }
+    }
+
     // 3. Sort turns topologically (causality-first, clock-skew resilient) and build thread DAG
-    const { turns, dag, clockSkewAnomalies } = this.orderTurnsAndBuildDAG(rawTurns);
+    const { turns, dag, anomalies: orderingAnomalies } = this.orderTurnsAndBuildDAG(rawTurns, invalidDurationAnomalies);
 
     // 4. Compute aggregate statistics
     const totalTokens = turns.reduce((acc, t) => acc + t.totalTokens, 0);
@@ -106,7 +128,7 @@ export class ThreadAggregator {
       status: overallStatus,
       dag,
       turns,
-      anomalies: clockSkewAnomalies,
+      anomalies: orderingAnomalies,
     });
   }
 
@@ -143,6 +165,17 @@ export class ThreadAggregator {
     }
 
     let modelName = "unknown-model";
+    if (rootSpan) {
+      const rootModel =
+        (rootSpan.attributes["llm.model_name"] as string) ||
+        (rootSpan.attributes["llm.model"] as string) ||
+        (rootSpan.attributes["gen_ai.request.model"] as string) ||
+        (rootSpan.attributes["model"] as string);
+      if (rootModel) {
+        modelName = rootModel;
+      }
+    }
+
     let promptTokens = 0;
     let completionTokens = 0;
     let reasoningTokens = 0;
@@ -156,34 +189,48 @@ export class ThreadAggregator {
       const attrs = span.attributes;
 
       // Check for LLM span
+      const detectedModel =
+        (attrs["llm.model_name"] as string) ||
+        (attrs["llm.model"] as string) ||
+        (attrs["gen_ai.request.model"] as string) ||
+        (attrs["model"] as string);
+
       if (
         span.name.startsWith("llm:") ||
-        ((span.spanKind === "LLM" || span.spanKind === "SPAN_KIND_INTERNAL") && "llm.model_name" in attrs)
+        span.spanKind === "LLM" ||
+        detectedModel !== undefined
       ) {
-        modelName = (attrs["llm.model_name"] as string) || modelName;
+        if (detectedModel) {
+          modelName = detectedModel;
+        }
         promptTokens += Number(attrs["llm.token_count.prompt"] || 0);
         completionTokens += Number(attrs["llm.token_count.completion"] || 0);
         reasoningTokens += Number(attrs["llm.token_count.completion_details.reasoning"] || 0);
         totalTokens += Number(attrs["llm.token_count.total"] || 0);
       }
 
-      // Prompt and response previews
-      if (!promptPreview && attrs["input.value"]) {
-        const rawIn = String(attrs["input.value"]).trim();
-        promptPreview = rawIn.length > 120 ? `${rawIn.slice(0, 120)}...` : rawIn;
-      }
-      if (!responsePreview && attrs["output.value"]) {
-        const rawOut = String(attrs["output.value"]).trim();
-        responsePreview = rawOut.length > 120 ? `${rawOut.slice(0, 120)}...` : rawOut;
+      const isToolSpan =
+        span.name.startsWith("tool:") ||
+        ((span.spanKind === "TOOL" || span.spanKind === "SPAN_KIND_INTERNAL") && "tool.name" in attrs);
+
+      // Prompt and response previews (from agent turn or non-tool spans)
+      if (!isToolSpan) {
+        if (!promptPreview && attrs["input.value"]) {
+          const rawIn = String(attrs["input.value"]).trim();
+          promptPreview = rawIn.length > 120 ? `${rawIn.slice(0, 120)}...` : rawIn;
+        }
+        if (!responsePreview && attrs["output.value"]) {
+          const rawOut = String(attrs["output.value"]).trim();
+          responsePreview = rawOut.length > 120 ? `${rawOut.slice(0, 120)}...` : rawOut;
+        }
       }
 
       // Check for Tool span
-      if (
-        span.name.startsWith("tool:") ||
-        ((span.spanKind === "TOOL" || span.spanKind === "SPAN_KIND_INTERNAL") && "tool.name" in attrs)
-      ) {
+      if (isToolSpan) {
         const toolName = (attrs["tool.name"] as string) || span.name.replace(/^tool:/, "");
-        const toolIn = String(attrs["input.value"] || "").slice(0, 80);
+        const rawToolIn = attrs["input.value"];
+        const semanticIn = extractSemanticToolInput(rawToolIn);
+        const toolIn = semanticIn.length > 80 ? semanticIn.slice(0, 80) : semanticIn;
         const toolBytes = Number(attrs["tool.output_bytes"] || 0);
 
         tools.push({
@@ -225,16 +272,19 @@ export class ThreadAggregator {
     };
   }
 
-  private orderTurnsAndBuildDAG(rawTurns: AgentTurn[]): {
+  private orderTurnsAndBuildDAG(
+    rawTurns: AgentTurn[],
+    additionalAnomalies: Anomaly[] = [],
+  ): {
     turns: AgentTurn[];
     dag: ThreadDAG;
-    clockSkewAnomalies: Anomaly[];
+    anomalies: Anomaly[];
   } {
     if (rawTurns.length === 0) {
       return {
         turns: [],
         dag: { rootIndices: [], edges: [], branches: [] },
-        clockSkewAnomalies: [],
+        anomalies: additionalAnomalies,
       };
     }
 
@@ -289,7 +339,7 @@ export class ThreadAggregator {
             } else if (parent.endTime && childTime < parentEndTime - 100) {
               const overlapMs = parentEndTime - childTime;
               clockSkewAnomalies.push({
-                type: "CLOCK_SKEW",
+                type: "CAUSAL_OVERLAP",
                 severity: "WARNING",
                 message: `Causal overlap detected: '${turn.agentName}' started ${overlapMs}ms before '${parent.agentName}' finished executing.`,
                 traceId: turn.traceId,
@@ -307,14 +357,22 @@ export class ThreadAggregator {
       }
     }
 
-    // Topological Sort (Kahn's algorithm with timestamp tie-breaking)
-    const sortedTurns: AgentTurn[] = [];
-    const ready: AgentTurn[] = rawTurns.filter((t) => inDegree.get(t) === 0);
-    ready.sort((a, b) => {
+    // Helper for deterministic tie-breaking (timestamp first, then event/trace ID)
+    const compareTurns = (a: AgentTurn, b: AgentTurn): number => {
       const tA = a.startTime ? a.startTime.getTime() : 0;
       const tB = b.startTime ? b.startTime.getTime() : 0;
-      return tA - tB;
-    });
+      if (tA !== tB) {
+        return tA - tB;
+      }
+      const keyA = a.nostrEventId || a.traceId;
+      const keyB = b.nostrEventId || b.traceId;
+      return keyA.localeCompare(keyB);
+    };
+
+    // Topological Sort (Kahn's algorithm with timestamp and identifier tie-breaking)
+    const sortedTurns: AgentTurn[] = [];
+    const ready: AgentTurn[] = rawTurns.filter((t) => inDegree.get(t) === 0);
+    ready.sort(compareTurns);
 
     while (ready.length > 0) {
       const current = ready.shift()!;
@@ -325,11 +383,7 @@ export class ThreadAggregator {
         const deg = (inDegree.get(child) || 1) - 1;
         inDegree.set(child, deg);
         if (deg === 0) {
-          const childTime = child.startTime ? child.startTime.getTime() : 0;
-          const insertIdx = ready.findIndex((item) => {
-            const itemTime = item.startTime ? item.startTime.getTime() : 0;
-            return itemTime > childTime;
-          });
+          const insertIdx = ready.findIndex((item) => compareTurns(item, child) > 0);
           if (insertIdx === -1) {
             ready.push(child);
           } else {
@@ -342,11 +396,7 @@ export class ThreadAggregator {
     // Fallback if graph had cycles or disconnected unreached nodes
     if (sortedTurns.length < rawTurns.length) {
       const remaining = rawTurns.filter((t) => !sortedTurns.includes(t));
-      remaining.sort((a, b) => {
-        const tA = a.startTime ? a.startTime.getTime() : 0;
-        const tB = b.startTime ? b.startTime.getTime() : 0;
-        return tA - tB;
-      });
+      remaining.sort(compareTurns);
       sortedTurns.push(...remaining);
     }
 
@@ -387,6 +437,13 @@ export class ThreadAggregator {
       }
     }
 
+    // Ensure all turns have a branchId (e.g. for cyclic components without roots)
+    for (const turn of sortedTurns) {
+      if (!turn.branchId) {
+        turn.branchId = "main";
+      }
+    }
+
     const branchMap = new Map<string, number[]>();
     for (const turn of sortedTurns) {
       const bId = turn.branchId || "main";
@@ -407,22 +464,30 @@ export class ThreadAggregator {
       branches,
     };
 
-    // Attach turnIndex to clockSkewAnomalies
-    for (const a of clockSkewAnomalies) {
+    // Attach turnIndex to all anomalies
+    const allAnomalies = [...clockSkewAnomalies, ...additionalAnomalies];
+    for (const a of allAnomalies) {
       const matchingTurn = sortedTurns.find((t) => t.traceId === a.traceId);
       if (matchingTurn) {
         a.turnIndex = matchingTurn.turnIndex;
-        if (a.details && matchingTurn.parentTurnIndex) {
+        if (a.details) {
           a.details.turnIndex = matchingTurn.turnIndex;
-          a.details.parentTurnIndex = matchingTurn.parentTurnIndex;
+          if (matchingTurn.parentTurnIndex) {
+            a.details.parentTurnIndex = matchingTurn.parentTurnIndex;
+          }
         }
       }
     }
 
-    return { turns: sortedTurns, dag, clockSkewAnomalies };
+    return { turns: sortedTurns, dag, anomalies: allAnomalies };
   }
 
-  private assignBranches(current: AgentTurn, allTurns: AgentTurn[]): void {
+  private assignBranches(current: AgentTurn, allTurns: AgentTurn[], visited = new Set<number>()): void {
+    if (visited.has(current.turnIndex)) {
+      return;
+    }
+    visited.add(current.turnIndex);
+
     const children = (current.childrenTurnIndices || [])
       .map((idx) => allTurns.find((t) => t.turnIndex === idx))
       .filter((t): t is AgentTurn => t !== undefined);
@@ -436,7 +501,7 @@ export class ThreadAggregator {
           child.branchId = `branch-turn${current.turnIndex}-${i + 1}`;
         }
       }
-      this.assignBranches(child, allTurns);
+      this.assignBranches(child, allTurns, visited);
     }
   }
 }

@@ -653,7 +653,7 @@ describe("ThreadAggregator", () => {
     const agg = new ThreadAggregator("thread-overlap", "mobile", null, "http://localhost:6006");
     const result = agg.aggregate([parentSpan, childSpan]);
 
-    const overlap = result.anomalies.find((a) => a.type === "CLOCK_SKEW" && a.message.includes("Causal overlap"));
+    const overlap = result.anomalies.find((a) => (a.type === "CAUSAL_OVERLAP" || a.type === "CLOCK_SKEW") && a.message.includes("Causal overlap"));
     expect(overlap).toBeDefined();
     expect(overlap?.details?.skewMs).toBe(5000);
   });
