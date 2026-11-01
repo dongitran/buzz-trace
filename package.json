@@ -1,0 +1,66 @@
+{
+  "name": "buzz-trace",
+  "version": "0.1.0",
+  "description": "Distributed Thread Observability & Diagnostic CLI for Multi-Agent Nostr Networks",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "type": "module",
+  "bin": {
+    "buzz-trace": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc && chmod +x dist/cli.js",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src tests",
+    "lint:fix": "eslint src tests --fix",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "start": "node dist/cli.js",
+    "prepare": "husky",
+    "prepublishOnly": "npm run typecheck && npm run lint && npm run test && npm run build"
+  },
+  "lint-staged": {
+    "*.ts": [
+      "eslint --fix"
+    ]
+  },
+  "keywords": [
+    "observability",
+    "telemetry",
+    "opentelemetry",
+    "arize-phoenix",
+    "nostr",
+    "multi-agent",
+    "agentic-ai",
+    "distributed-tracing",
+    "ai-agents",
+    "cli"
+  ],
+  "author": "Dong Tran",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dongitran/buzz-trace.git"
+  },
+  "bugs": {
+    "url": "https://github.com/dongitran/buzz-trace/issues"
+  },
+  "homepage": "https://github.com/dongitran/buzz-trace#readme",
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@typescript-eslint/eslint-plugin": "^8.24.0",
+    "@typescript-eslint/parser": "^8.24.0",
+    "@vitest/coverage-v8": "^4.1.11",
+    "eslint": "^10.9.1",
+    "husky": "^9.1.7",
+    "lint-staged": "^15.4.3",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.11"
+  }
+}
