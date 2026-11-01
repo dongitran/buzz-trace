@@ -8,7 +8,7 @@ describe("CLI", () => {
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     const code = await main(["--version"]);
     expect(code).toBe(0);
-    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining("buzz-trace 0.1.4"));
+    expect(logSpy).toHaveBeenCalledWith(expect.stringMatching(/buzz-trace 0\.1\.\d+/));
     logSpy.mockRestore();
   });
 

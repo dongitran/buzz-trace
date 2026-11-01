@@ -64,31 +64,49 @@ When running locally on the Docker host:
 buzz-trace inspect a519f713... --db /root/.phoenix/phoenix.db
 ```
 
-### 3. AI / Machine Output Mode
+### 3. AI Agent Self-Reflection & Compact Query Mode (<200 tokens)
+Designed specifically for LLM context preservation and subagent evaluation:
 ```bash
-# Compact JSON schema for LLMs and scripts
-buzz-trace inspect a519f713... --json
+# Query thread health with zero tool errors in <80 tokens
+buzz-trace query a519f713... --failures --compact --json
+
+# Tail the most recent turn and inspect tool executions in <150 tokens
+buzz-trace query a519f713... --last 1 --compact --json
+
+# Inspect turn 2's specific tools and parameters
+buzz-trace query a519f713... --turn 2 --tools --compact --json
 ```
 
-### 4. Markdown Report Generation
+### 4. Install Global AI Skill
+Integrates `buzz-trace` directly into Claude Code and cross-agent environments (`~/.claude/skills` and `~/.agents/skills`):
+```bash
+# Install or symlink skill globally
+buzz-trace install-skill
+
+# Force overwrite or preview actions
+buzz-trace install-skill --force
+buzz-trace install-skill --dry-run
+```
+
+### 5. Markdown Report Generation
 ```bash
 # Generate markdown for GitLab MRs / GitHub issues
 buzz-trace inspect a519f713... --markdown > incident-report.md
 ```
 
-### 5. Automated Health Diagnostics
+### 6. Automated Health Diagnostics
 ```bash
 # Runs anomaly checks; exits with code 1 if critical issues (e.g. context canceled or loops) are found
 buzz-trace analyze a519f713...
 ```
 
-### 6. Live Execution Watch
+### 7. Live Execution Watch
 ```bash
 # Continuously watches thread turns in real-time as agents respond
 buzz-trace watch a519f713... --interval 2.0
 ```
 
-### 7. List Active Sessions
+### 8. List Active Sessions
 ```bash
 # View recent sessions and traces recorded in Phoenix
 buzz-trace sessions --project mobile --limit 10

@@ -4,6 +4,10 @@
  * Command-Line Interface (CLI) entry point for buzz-trace.
  */
 
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { PhoenixClient, PhoenixDBClient, type PhoenixSession } from "./clients/index.js";
 import { Config, ConfigOptions } from "./config.js";
@@ -11,7 +15,7 @@ import { ThreadAggregator, AnomalyDetector, ThreadQueryEngine } from "./engine/i
 import { JsonRenderer, MarkdownRenderer, TerminalRenderer } from "./formatters/index.js";
 import { SpanNode, ThreadTelemetry } from "./models.js";
 
-const VERSION = "0.1.4";
+const VERSION = "0.1.5";
 
 const HELP_TEXT = `
 buzz-trace ${VERSION}
@@ -26,6 +30,7 @@ COMMANDS:
   analyze <thread_id>   Perform automated diagnostic & anomaly detection on a thread
   sessions              List recent active sessions and thread traces
   watch <thread_id>     Live monitor thread execution in real-time
+  install-skill         Install buzz-trace skill to AI agent runtimes (~/.claude, ~/.agents)
 
 OPTIONS:
   --endpoint <url>      Arize Phoenix server endpoint (default: http://localhost:6006)
@@ -40,6 +45,9 @@ OPTIONS:
   --agent <name>        Filter turns by agent name (e.g. phoenix-twin, agent-builder)
   --last <num>          Tail the last N chronological turns
   --turn <num>          Inspect a specific turn by 1-based index
+  --target <dir>        Explicit target directory for install-skill
+  --force               Force overwrite existing skill files/symlinks
+  --dry-run             Preview install-skill actions without writing to disk
   --markdown            Output GitHub/GitLab Markdown report
   --verbose, -v         Include verbose details (e.g. tool output previews)
   --no-color            Disable ANSI color codes
@@ -244,6 +252,147 @@ export async function runWatch(
   });
 }
 
+export function findPackageRoot(fromUrlOrPath?: string): string {
+  try {
+    let curr: string;
+    if (fromUrlOrPath) {
+      curr = fromUrlOrPath.startsWith("file:") ? path.dirname(fileURLToPath(fromUrlOrPath)) : path.resolve(fromUrlOrPath);
+    } else {
+      curr = path.dirname(fileURLToPath(import.meta.url));
+    }
+
+    while (curr !== path.dirname(curr)) {
+      const pkgJsonPath = path.join(curr, "package.json");
+      if (fs.existsSync(pkgJsonPath)) {
+        return curr;
+      }
+      curr = path.dirname(curr);
+    }
+  } catch {
+    // fallback
+  }
+  return path.resolve(process.cwd());
+}
+
+export interface InstallSkillOptions {
+  target?: string;
+  force?: boolean;
+  dryRun?: boolean;
+  packageRoot?: string;
+  homedir?: string;
+  symlinkFn?: (target: string, path: string, type?: string) => void;
+}
+
+export function runInstallSkill(options: InstallSkillOptions = {}): number {
+  const pkgRoot = options.packageRoot || findPackageRoot();
+  const skillSourceDir = path.join(pkgRoot, "skills", "buzz-trace");
+  const skillFile = path.join(skillSourceDir, "SKILL.md");
+
+  if (!fs.existsSync(skillFile)) {
+    console.error(`Error: Skill definition not found at: ${skillFile}`);
+    return 1;
+  }
+
+  const targetDirs: string[] = [];
+  if (options.target) {
+    let resolved = path.resolve(options.target);
+    if (path.basename(resolved) !== "buzz-trace") {
+      resolved = path.join(resolved, "buzz-trace");
+    }
+    targetDirs.push(resolved);
+  } else {
+    const home = options.homedir || os.homedir();
+    targetDirs.push(path.join(home, ".claude", "skills", "buzz-trace"));
+    targetDirs.push(path.join(home, ".agents", "skills", "buzz-trace"));
+  }
+
+  console.log(`Installing buzz-trace skill from: ${skillSourceDir}`);
+  if (options.dryRun) {
+    console.log("[dry-run] Would install skill to:");
+    for (const dest of targetDirs) {
+      console.log(`  - ${dest}`);
+    }
+    return 0;
+  }
+
+  const symlinkType = process.platform === "win32" ? "junction" : "dir";
+  const symlink = options.symlinkFn || fs.symlinkSync;
+  let successCount = 0;
+
+  for (const dest of targetDirs) {
+    try {
+      const parentDir = path.dirname(dest);
+      fs.mkdirSync(parentDir, { recursive: true });
+
+      let stat: fs.Stats | null = null;
+      try {
+        stat = fs.lstatSync(dest);
+      } catch {
+        stat = null;
+      }
+
+      if (stat) {
+        if (stat.isSymbolicLink()) {
+          try {
+            const currentTarget = fs.readlinkSync(dest);
+            if (path.resolve(parentDir, currentTarget) === path.resolve(skillSourceDir) && !options.force) {
+              console.log(`  [up-to-date] ${dest}`);
+              successCount++;
+              continue;
+            }
+          } catch {
+            // Dangling or invalid link
+          }
+        }
+
+        if (!options.force) {
+          console.log(`  [exists] ${dest} (use --force to overwrite)`);
+          successCount++;
+          continue;
+        }
+        fs.rmSync(dest, { recursive: true, force: true });
+      }
+
+      // Create atomic symlink with fallback to recursive copy
+      const tempDest = path.join(
+        parentDir,
+        `.tmp-skill-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      );
+
+      let installedViaSymlink = false;
+      try {
+        symlink(skillSourceDir, tempDest, symlinkType);
+        try {
+          fs.renameSync(tempDest, dest);
+        } catch {
+          if (stat) {
+            fs.rmSync(dest, { recursive: true, force: true });
+          }
+          fs.renameSync(tempDest, dest);
+        }
+        installedViaSymlink = true;
+      } catch {
+        try {
+          fs.rmSync(tempDest, { recursive: true, force: true });
+        } catch {
+          // ignore
+        }
+        if (stat) {
+          fs.rmSync(dest, { recursive: true, force: true });
+        }
+        fs.cpSync(skillSourceDir, dest, { recursive: true });
+      }
+
+      console.log(`  ✓ ${installedViaSymlink ? "Linked (symlink)" : "Copied"} -> ${dest}`);
+      successCount++;
+    } catch (err) {
+      console.error(`  ✗ Failed to install to ${dest}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  return successCount > 0 ? 0 : 1;
+}
+
 export async function main(argv: string[] = process.argv.slice(2)): Promise<number> {
   const optionsConfig = {
     endpoint: { type: "string" as const },
@@ -259,6 +408,9 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     agent: { type: "string" as const },
     last: { type: "string" as const },
     turn: { type: "string" as const },
+    target: { type: "string" as const },
+    force: { type: "boolean" as const, default: false },
+    "dry-run": { type: "boolean" as const, default: false },
     markdown: { type: "boolean" as const, default: false },
     verbose: { type: "boolean" as const, short: "v", default: false },
     "no-color": { type: "boolean" as const, default: false },
@@ -359,6 +511,13 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
         return await runWatch(targetId, config, intervalNum, {
           verbose: values.verbose,
           noColor: values["no-color"],
+        });
+      }
+      case "install-skill": {
+        return runInstallSkill({
+          target: values.target,
+          force: values.force,
+          dryRun: values["dry-run"],
         });
       }
       default: {
