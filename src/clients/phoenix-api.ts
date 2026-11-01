@@ -142,8 +142,49 @@ export class PhoenixClient {
   }
 
   async getSpansForThread(project: string, threadId: string): Promise<SpanNode[]> {
-    // 1. Primary lookup: spans where session.id = threadId
-    const rootSpans = await this.getSpansByAttribute(project, "session.id", threadId);
+    const cleanId = threadId.trim();
+
+    // 1. Direct Trace ID lookup (32 hex characters):
+    if (/^[0-9a-fA-F]{32}$/.test(cleanId)) {
+      const traceSpans = await this.getSpansByTraceId(project, cleanId);
+      if (traceSpans.length > 0) {
+        // Resolve full session if available
+        const root = traceSpans.find((s) => s.parentId === null) || traceSpans[0];
+        const sessionId = (root.attributes["session.id"] || root.attributes["nostr.thread_id"]) as string | undefined;
+        if (sessionId && sessionId !== cleanId) {
+          const sessionSpans = await this.getSpansForThread(project, sessionId);
+          if (sessionSpans.length > 0) {
+            return sessionSpans;
+          }
+        }
+        return traceSpans;
+      }
+    }
+
+    // 2. Primary lookup: spans where session.id = threadId
+    let rootSpans = await this.getSpansByAttribute(project, "session.id", cleanId);
+
+    // 3. Fallback: match by nostr.thread_id
+    if (rootSpans.length === 0) {
+      rootSpans = await this.getSpansByAttribute(project, "nostr.thread_id", cleanId);
+    }
+
+    // 4. Fallback: match by nostr.event_id (when given a specific message event ID)
+    if (rootSpans.length === 0) {
+      const eventSpans = await this.getSpansByAttribute(project, "nostr.event_id", cleanId);
+      if (eventSpans.length > 0) {
+        const root = eventSpans[0];
+        const sessionId = (root.attributes["session.id"] || root.attributes["nostr.thread_id"]) as string | undefined;
+        if (sessionId && sessionId !== cleanId) {
+          const sessionSpans = await this.getSpansForThread(project, sessionId);
+          if (sessionSpans.length > 0) {
+            return sessionSpans;
+          }
+        }
+        return eventSpans;
+      }
+    }
+
     if (rootSpans.length > 0) {
       const uniqueTraceIds = Array.from(new Set(rootSpans.map((s) => s.traceId).filter(Boolean)));
       const allSpans: SpanNode[] = [];
@@ -154,10 +195,10 @@ export class PhoenixClient {
       return allSpans;
     }
 
-    // 2. Secondary lookup: match in sessions list
+    // 5. Secondary lookup: match in sessions list
     try {
       const sessions = await this.listSessions(project, 50);
-      const matched = sessions.find((s) => s.session_id === threadId || s.id === threadId);
+      const matched = sessions.find((s) => s.session_id === cleanId || s.id === cleanId);
       if (matched && matched.traces) {
         const allSpans: SpanNode[] = [];
         for (const tr of matched.traces) {

@@ -68,6 +68,20 @@ export class ThreadAggregator {
       overallStatus = "ERROR";
     }
 
+    let nostrThreadId: string | null = null;
+    let nostrChannelId: string | null = null;
+
+    for (const turn of turns) {
+      for (const span of turn.spans) {
+        if (!nostrThreadId && span.attributes["nostr.thread_id"]) {
+          nostrThreadId = span.attributes["nostr.thread_id"] as string;
+        }
+        if (!nostrChannelId && span.attributes["nostr.channel_id"]) {
+          nostrChannelId = span.attributes["nostr.channel_id"] as string;
+        }
+      }
+    }
+
     const resolvedSessionId =
       this.sessionId ||
       (turns.length > 0 && turns[0].spans.length > 0
@@ -78,6 +92,8 @@ export class ThreadAggregator {
       threadId: this.threadId,
       project: this.project,
       sessionId: resolvedSessionId,
+      nostrThreadId,
+      nostrChannelId,
       totalTurns: turns.length,
       totalTokens,
       totalPromptTokens,
@@ -103,16 +119,23 @@ export class ThreadAggregator {
     const turnStatus = rootSpan?.statusCode || "OK";
     const turnMsg = rootSpan?.statusMessage || null;
 
-    // Agent name attribution
+    // Agent name and Nostr event attribution
     let agentName = "unknown-agent";
+    let nostrEventId: string | null = null;
+    let nostrReplyTo: string | null = null;
+
     if (rootSpan) {
       const attrs = rootSpan.attributes;
       agentName =
+        (attrs["agent.id"] as string) ||
         (attrs["agent.name"] as string) ||
         (attrs["service.name"] as string) ||
         (attrs["agent_name"] as string) ||
         (attrs["community.agent"] as string) ||
         "phoenix-twin";
+
+      nostrEventId = (attrs["nostr.event_id"] as string) || null;
+      nostrReplyTo = (attrs["nostr.reply_to"] as string) || null;
     }
 
     let modelName = "unknown-model";
@@ -180,6 +203,8 @@ export class ThreadAggregator {
       traceId,
       agentName,
       modelName,
+      nostrEventId,
+      nostrReplyTo,
       startTime: turnStart,
       endTime: turnEnd,
       durationMs: turnDuration,

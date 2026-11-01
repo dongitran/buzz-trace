@@ -11,7 +11,7 @@ import { ThreadAggregator, AnomalyDetector } from "./engine/index.js";
 import { JsonRenderer, MarkdownRenderer, TerminalRenderer } from "./formatters/index.js";
 import { SpanNode, ThreadTelemetry } from "./models.js";
 
-const VERSION = "0.1.2";
+const VERSION = "0.1.3";
 
 const HELP_TEXT = `
 buzz-trace ${VERSION}

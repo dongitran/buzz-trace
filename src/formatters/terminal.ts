@@ -59,8 +59,14 @@ export class TerminalRenderer {
     // Metadata
     lines.push(`  ${this.bold("Thread ID   :")} ${this.cyan(t.threadId)}`);
     lines.push(`  ${this.bold("Project     :")} ${t.project}`);
-    if (t.sessionId) {
+    if (t.sessionId && t.sessionId !== t.threadId) {
       lines.push(`  ${this.bold("Session ID  :")} ${t.sessionId}`);
+    }
+    if (t.nostrThreadId && t.nostrThreadId !== t.threadId) {
+      lines.push(`  ${this.bold("Nostr Root  :")} ${t.nostrThreadId}`);
+    }
+    if (t.nostrChannelId) {
+      lines.push(`  ${this.bold("Channel ID  :")} ${t.nostrChannelId}`);
     }
     lines.push(
       `  ${this.bold("Total Tokens:")} ${this.yellow(t.totalTokens.toLocaleString())} ` +
@@ -106,6 +112,9 @@ export class TerminalRenderer {
           `${this.dim(`(${durStr} · ${tokStr})`)}`,
       );
       lines.push(`  ${this.dim("│")}  ${this.bold("Trace ID :")} ${turn.traceId}`);
+      if (turn.nostrEventId) {
+        lines.push(`  ${this.dim("│")}  ${this.bold("Event ID :")} ${turn.nostrEventId}`);
+      }
       lines.push(`  ${this.dim("│")}  ${this.bold("Model    :")} ${this.magenta(turn.modelName)}`);
 
       if (turn.promptPreview) {

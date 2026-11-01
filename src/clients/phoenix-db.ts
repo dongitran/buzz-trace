@@ -31,6 +31,7 @@ export class PhoenixDBClient {
   }
 
   getSpansForThread(threadId: string): SpanNode[] {
+    const cleanId = threadId.trim();
     const db = new DatabaseSync(this.dbPath, { readOnly: true });
     try {
       const query = `
@@ -49,11 +50,46 @@ export class PhoenixDBClient {
         JOIN traces t ON s.trace_rowid = t.id
         WHERE json_extract(s.attributes, '$.session.id') = ?
            OR json_extract(s.attributes, '$.attributes.session.id') = ?
+           OR json_extract(s.attributes, '$.nostr.thread_id') = ?
+           OR json_extract(s.attributes, '$.attributes.nostr.thread_id') = ?
+           OR json_extract(s.attributes, '$.nostr.event_id') = ?
+           OR json_extract(s.attributes, '$.attributes.nostr.event_id') = ?
+           OR t.trace_id = ?
         ORDER BY s.start_time ASC;
       `;
 
       const stmt = db.prepare(query);
-      const rows = stmt.all(threadId, threadId) as unknown as SpanRow[];
+      let rows = stmt.all(cleanId, cleanId, cleanId, cleanId, cleanId, cleanId, cleanId) as unknown as SpanRow[];
+
+      // If matched a trace or event, check if they belong to a larger session
+      if (rows.length > 0) {
+        for (const r of rows) {
+          if (r.attributes) {
+            try {
+              const parsed = JSON.parse(r.attributes);
+              const sid = (parsed["session.id"] || parsed?.attributes?.["session.id"] || parsed["nostr.thread_id"]) as string | undefined;
+              if (sid && sid !== cleanId) {
+                const sessionStmt = db.prepare(`
+                  SELECT t.trace_id, s.span_id, s.parent_id, s.name, s.span_kind, s.start_time, s.end_time, s.status_code, s.status_message, s.attributes
+                  FROM spans s
+                  JOIN traces t ON s.trace_rowid = t.id
+                  WHERE json_extract(s.attributes, '$.session.id') = ?
+                     OR json_extract(s.attributes, '$.attributes.session.id') = ?
+                     OR json_extract(s.attributes, '$.nostr.thread_id') = ?
+                  ORDER BY s.start_time ASC;
+                `);
+                const sessionRows = sessionStmt.all(sid, sid, sid) as unknown as SpanRow[];
+                if (sessionRows.length > 0) {
+                  rows = sessionRows;
+                  break;
+                }
+              }
+            } catch {
+              // Ignore parse error
+            }
+          }
+        }
+      }
 
       return rows.map((row) => {
         let parsedAttrs: Record<string, unknown> = {};
