@@ -4,7 +4,7 @@ Unit tests for data models.
 
 import unittest
 from datetime import datetime, timezone
-from buzz_trace.models import SpanNode, ToolExecution, AgentTurn, ThreadTelemetry, Anomaly
+from src.models import SpanNode, ToolExecution, AgentTurn, ThreadTelemetry, Anomaly
 
 
 class TestModels(unittest.TestCase):

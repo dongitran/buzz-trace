@@ -34,8 +34,8 @@ dev = [
 ]
 
 [project.scripts]
-buzz-trace = "buzz_trace.cli:main"
+buzz-trace = "src.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["buzz_trace*"]
+include = ["src*"]

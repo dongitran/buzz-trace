@@ -43,7 +43,7 @@ pip install -e .
 
 Or run directly without installation:
 ```bash
-python3 -m buzz_trace.cli --help
+python3 -m src.cli --help
 ```
 
 ---
@@ -158,4 +158,8 @@ pytest -v
 
 ## 📄 License
 
-MIT License. Copyright (c) 2026 Đông Trần.
+MIT License.
+
+---
+
+<p align="center">Made with ❤️ to make your work life easier!</p>

@@ -3,8 +3,8 @@ Unit tests for AnomalyDetector.
 """
 
 import unittest
-from buzz_trace.models import AgentTurn, ThreadTelemetry, ToolExecution
-from buzz_trace.engine.analyzer import AnomalyDetector
+from src.models import AgentTurn, ThreadTelemetry, ToolExecution
+from src.engine.analyzer import AnomalyDetector
 
 
 class TestAnalyzer(unittest.TestCase):

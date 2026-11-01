@@ -4,8 +4,8 @@ Unit tests for ThreadAggregator.
 
 import unittest
 from datetime import datetime, timezone
-from buzz_trace.models import SpanNode
-from buzz_trace.engine.aggregator import ThreadAggregator
+from src.models import SpanNode
+from src.engine.aggregator import ThreadAggregator
 
 
 class TestAggregator(unittest.TestCase):

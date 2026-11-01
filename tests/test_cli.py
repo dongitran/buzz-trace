@@ -6,8 +6,8 @@ import io
 import sys
 import unittest
 from unittest.mock import patch
-from buzz_trace.cli import build_parser, main
-from buzz_trace.models import ThreadTelemetry, AgentTurn
+from src.cli import build_parser, main
+from src.models import ThreadTelemetry, AgentTurn
 
 
 class TestCLI(unittest.TestCase):
@@ -38,7 +38,7 @@ class TestCLI(unittest.TestCase):
             ],
         )
 
-        with patch("buzz_trace.cli.fetch_thread_telemetry", return_value=mock_telemetry):
+        with patch("src.cli.fetch_thread_telemetry", return_value=mock_telemetry):
             buf = io.StringIO()
             with patch.object(sys, "stdout", buf):
                 ret = main(["inspect", "test-root-event", "--no-color"])
