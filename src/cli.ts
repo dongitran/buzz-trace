@@ -5,13 +5,13 @@
  */
 
 import { parseArgs } from "node:util";
-import { PhoenixClient, PhoenixDBClient } from "./clients/index.js";
+import { PhoenixClient, PhoenixDBClient, type PhoenixSession } from "./clients/index.js";
 import { Config, ConfigOptions } from "./config.js";
-import { ThreadAggregator, AnomalyDetector } from "./engine/index.js";
+import { ThreadAggregator, AnomalyDetector, ThreadQueryEngine } from "./engine/index.js";
 import { JsonRenderer, MarkdownRenderer, TerminalRenderer } from "./formatters/index.js";
 import { SpanNode, ThreadTelemetry } from "./models.js";
 
-const VERSION = "0.1.3";
+const VERSION = "0.1.4";
 
 const HELP_TEXT = `
 buzz-trace ${VERSION}
@@ -22,15 +22,24 @@ USAGE:
 
 COMMANDS:
   inspect <thread_id>   Inspect telemetry timeline for a Nostr thread ID
+  query <thread_id>     Query & filter thread conversation history (for AI self-reflection)
   analyze <thread_id>   Perform automated diagnostic & anomaly detection on a thread
   sessions              List recent active sessions and thread traces
   watch <thread_id>     Live monitor thread execution in real-time
 
 OPTIONS:
   --endpoint <url>      Arize Phoenix server endpoint (default: http://localhost:6006)
+  --ui-endpoint <url>   Arize Phoenix Web UI base URL (for clickable links)
   --project <name>      Arize Phoenix project name (default: mobile)
   --db <path>           Direct path to Phoenix SQLite database file (mode=ro)
   --json                Output AI-optimized structured JSON
+  --compact             Emit token-optimized compact output (<250 tokens for LLM context)
+  --failures, --errors  Filter turns with non-zero exit code, tool errors, or anomalies
+  --tools               Filter turns containing tool executions
+  --tool <name>         Filter turns invoking a specific tool (e.g. run_command)
+  --agent <name>        Filter turns by agent name (e.g. phoenix-twin, agent-builder)
+  --last <num>          Tail the last N chronological turns
+  --turn <num>          Inspect a specific turn by 1-based index
   --markdown            Output GitHub/GitLab Markdown report
   --verbose, -v         Include verbose details (e.g. tool output previews)
   --no-color            Disable ANSI color codes
@@ -51,8 +60,15 @@ export async function fetchThreadTelemetry(config: Config, threadId: string): Pr
     spans = await apiClient.getSpansForThread(config.project, threadId);
   }
 
-  const aggregator = new ThreadAggregator(threadId, config.project);
+  const aggregator = new ThreadAggregator(threadId, config.project, null, config.uiEndpoint);
   const telemetry = aggregator.aggregate(spans);
+
+  // Set Phoenix Web UI deep links
+  telemetry.phoenixUiUrl = config.uiEndpoint;
+  telemetry.phoenixSessionUrl = config.getSessionUrl(telemetry.sessionId, telemetry.threadId);
+  for (const turn of telemetry.turns) {
+    turn.traceUrl = config.getTraceUrl(turn.traceId);
+  }
 
   const analyzer = new AnomalyDetector();
   analyzer.analyze(telemetry);
@@ -60,16 +76,66 @@ export async function fetchThreadTelemetry(config: Config, threadId: string): Pr
   return telemetry;
 }
 
+export interface QueryFlags {
+  json?: boolean;
+  compact?: boolean;
+  markdown?: boolean;
+  failures?: boolean;
+  tools?: boolean;
+  toolName?: string;
+  agent?: string;
+  last?: string;
+  turn?: string;
+  verbose?: boolean;
+  noColor?: boolean;
+}
+
+export async function runQuery(
+  threadId: string,
+  config: Config,
+  flags: QueryFlags,
+): Promise<number> {
+  const rawTelemetry = await fetchThreadTelemetry(config, threadId);
+
+  const queryEngine = new ThreadQueryEngine();
+  const telemetry = queryEngine.filter(rawTelemetry, {
+    failuresOnly: flags.failures,
+    toolsOnly: flags.tools,
+    toolName: flags.toolName,
+    agentFilter: flags.agent,
+    lastN: flags.last ? parseInt(flags.last, 10) : undefined,
+    targetTurn: flags.turn ? parseInt(flags.turn, 10) : undefined,
+  });
+
+  if (flags.json) {
+    const renderer = new JsonRenderer();
+    console.log(renderer.render(telemetry, { compact: flags.compact, config }));
+  } else if (flags.markdown) {
+    const renderer = new MarkdownRenderer();
+    console.log(renderer.render(telemetry));
+  } else {
+    const renderer = new TerminalRenderer(!flags.noColor);
+    console.log(renderer.render(telemetry, flags.verbose));
+  }
+
+  return telemetry.status === "ERROR" ? 1 : 0;
+}
+
 export async function runInspect(
   threadId: string,
   config: Config,
-  flags: { json?: boolean; markdown?: boolean; verbose?: boolean; noColor?: boolean },
+  flags: QueryFlags,
 ): Promise<number> {
+  // If query filter flags are passed to inspect, delegate to runQuery
+  if (flags.failures || flags.tools || flags.toolName || flags.agent || flags.last || flags.turn || flags.compact) {
+    return runQuery(threadId, config, flags);
+  }
+
   const telemetry = await fetchThreadTelemetry(config, threadId);
 
   if (flags.json) {
     const renderer = new JsonRenderer();
-    console.log(renderer.render(telemetry));
+    console.log(renderer.render(telemetry, { compact: flags.compact, config }));
   } else if (flags.markdown) {
     const renderer = new MarkdownRenderer();
     console.log(renderer.render(telemetry));
@@ -84,13 +150,13 @@ export async function runInspect(
 export async function runAnalyze(
   threadId: string,
   config: Config,
-  flags: { json?: boolean; markdown?: boolean; noColor?: boolean },
+  flags: { json?: boolean; compact?: boolean; markdown?: boolean; noColor?: boolean },
 ): Promise<number> {
   const telemetry = await fetchThreadTelemetry(config, threadId);
 
   if (flags.json) {
     const renderer = new JsonRenderer();
-    console.log(renderer.render(telemetry));
+    console.log(renderer.render(telemetry, { compact: flags.compact, config }));
   } else if (flags.markdown) {
     const renderer = new MarkdownRenderer();
     console.log(renderer.render(telemetry));
@@ -104,22 +170,29 @@ export async function runAnalyze(
 }
 
 export async function runSessions(config: Config, limit = 10): Promise<number> {
-  const apiClient = new PhoenixClient(config.endpoint, config.timeout);
-  const sessions = await apiClient.listSessions(config.project, limit);
+  let sessions: PhoenixSession[] = [];
 
-  console.log(`Arize Phoenix Sessions · Project: ${config.project} (Limit: ${limit})`);
+  if (config.dbPath) {
+    const dbClient = new PhoenixDBClient(config.dbPath);
+    sessions = dbClient.listSessions(config.project, limit);
+  } else {
+    const apiClient = new PhoenixClient(config.endpoint, config.timeout);
+    sessions = await apiClient.listSessions(config.project, limit);
+  }
+
+  console.log(`\nRECENT SESSIONS · Project: ${config.project} (showing up to ${limit})`);
   console.log("=".repeat(80));
 
-  if (!sessions || sessions.length === 0) {
-    console.log("No sessions found.");
+  if (sessions.length === 0) {
+    console.log("  No sessions found.");
     return 0;
   }
 
   for (let i = 0; i < sessions.length; i++) {
     const s = sessions[i];
     const sid = s.session_id || s.id;
-    const traces = s.traces || [];
-    const tokens = s.token_count_total || 0;
+    const traces = Array.isArray(s.traces) ? s.traces : [];
+    const tokens = typeof s.token_count_total === "number" ? s.token_count_total : 0;
     const start = s.start_time || "N/A";
     const idx = String(i + 1).padStart(2, "0");
 
@@ -174,9 +247,18 @@ export async function runWatch(
 export async function main(argv: string[] = process.argv.slice(2)): Promise<number> {
   const optionsConfig = {
     endpoint: { type: "string" as const },
+    "ui-endpoint": { type: "string" as const },
     project: { type: "string" as const },
     db: { type: "string" as const },
     json: { type: "boolean" as const, default: false },
+    compact: { type: "boolean" as const, default: false },
+    failures: { type: "boolean" as const, default: false },
+    errors: { type: "boolean" as const, default: false },
+    tools: { type: "boolean" as const, default: false },
+    tool: { type: "string" as const },
+    agent: { type: "string" as const },
+    last: { type: "string" as const },
+    turn: { type: "string" as const },
     markdown: { type: "boolean" as const, default: false },
     verbose: { type: "boolean" as const, short: "v", default: false },
     "no-color": { type: "boolean" as const, default: false },
@@ -216,10 +298,25 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
 
   const configOptions: ConfigOptions = {
     endpoint: values.endpoint,
+    uiEndpoint: values["ui-endpoint"],
     project: values.project,
     dbPath: values.db,
   };
   const config = Config.load(configOptions);
+
+  const queryFlags: QueryFlags = {
+    json: values.json,
+    compact: values.compact,
+    markdown: values.markdown,
+    failures: values.failures || values.errors,
+    tools: values.tools || Boolean(values.tool),
+    toolName: values.tool,
+    agent: values.agent,
+    last: values.last,
+    turn: values.turn,
+    verbose: values.verbose,
+    noColor: values["no-color"],
+  };
 
   try {
     switch (command) {
@@ -228,12 +325,14 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
           console.error("Error: 'inspect' requires a thread_id argument.");
           return 1;
         }
-        return await runInspect(targetId, config, {
-          json: values.json,
-          markdown: values.markdown,
-          verbose: values.verbose,
-          noColor: values["no-color"],
-        });
+        return await runInspect(targetId, config, queryFlags);
+      }
+      case "query": {
+        if (!targetId) {
+          console.error("Error: 'query' requires a thread_id argument.");
+          return 1;
+        }
+        return await runQuery(targetId, config, queryFlags);
       }
       case "analyze": {
         if (!targetId) {
@@ -242,6 +341,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
         }
         return await runAnalyze(targetId, config, {
           json: values.json,
+          compact: values.compact,
           markdown: values.markdown,
           noColor: values["no-color"],
         });
@@ -273,4 +373,10 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
   }
 }
 
-
+if (process.argv[1] && process.argv[1].endsWith("cli.js")) {
+  main().then((code) => {
+    if (code !== 0) {
+      process.exit(code);
+    }
+  });
+}

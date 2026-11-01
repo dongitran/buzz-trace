@@ -31,12 +31,34 @@ export class MarkdownRenderer {
       lines.push("## 2. Detected Anomalies");
       lines.push("");
       for (const a of t.anomalies) {
-        lines.push(`- **[${a.severity}]** Turn ${a.turnIndex}: ${a.message}`);
+        const turnRef = a.turnIndex ? `Turn ${a.turnIndex}` : "Thread";
+        lines.push(`- **[${a.severity}]** ${turnRef}: ${a.message}`);
       }
       lines.push("");
     }
 
-    lines.push("## 3. Turn Timeline");
+    if (t.dag && t.dag.edges.length > 0) {
+      lines.push("## 3. Multi-Agent DAG Hierarchy");
+      lines.push("");
+      lines.push("```mermaid");
+      lines.push("graph TD");
+      for (const edge of t.dag.edges) {
+        const fromTurn = t.turns.find((x) => x.turnIndex === edge.fromTurnIndex);
+        const toTurn = t.turns.find((x) => x.turnIndex === edge.toTurnIndex);
+        const fromLabel = fromTurn
+          ? `T${edge.fromTurnIndex}["Turn ${edge.fromTurnIndex}: ${fromTurn.agentName}"]`
+          : `T${edge.fromTurnIndex}`;
+        const toLabel = toTurn
+          ? `T${edge.toTurnIndex}["Turn ${edge.toTurnIndex}: ${toTurn.agentName}"]`
+          : `T${edge.toTurnIndex}`;
+        lines.push(`  ${fromLabel} --> ${toLabel}`);
+      }
+      lines.push("```");
+      lines.push("");
+    }
+
+    const timelineHeading = t.dag && t.dag.edges.length > 0 ? "## 4. Turn Timeline" : "## 3. Turn Timeline";
+    lines.push(timelineHeading);
     lines.push("");
     lines.push("| Turn | Agent | Model | Status | Latency | Tokens | Tools | Trace ID |");
     lines.push("| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |");
@@ -52,7 +74,8 @@ export class MarkdownRenderer {
     lines.push("");
 
     if (t.turns.some((turn) => turn.tools.length > 0)) {
-      lines.push("## 4. Tool Execution Breakdown");
+      const toolHeading = t.dag && t.dag.edges.length > 0 ? "## 5. Tool Execution Breakdown" : "## 4. Tool Execution Breakdown";
+      lines.push(toolHeading);
       lines.push("");
       for (const turn of t.turns) {
         if (turn.tools.length > 0) {

@@ -8,6 +8,7 @@ import * as path from "node:path";
 
 export interface ConfigOptions {
   endpoint?: string;
+  uiEndpoint?: string;
   project?: string;
   dbPath?: string;
   timeout?: number;
@@ -16,6 +17,7 @@ export interface ConfigOptions {
 
 export class Config {
   endpoint: string;
+  uiEndpoint: string;
   project: string;
   dbPath: string | null;
   timeout: number;
@@ -35,6 +37,17 @@ export class Config {
     }
 
     this.endpoint = resolvedEndpoint;
+
+    let resolvedUi =
+      options.uiEndpoint ||
+      process.env.PHOENIX_UI_ENDPOINT ||
+      this.endpoint;
+    resolvedUi = resolvedUi.replace(/\/+$/, "");
+    if (resolvedUi.endsWith("/v1")) {
+      resolvedUi = resolvedUi.slice(0, -3);
+    }
+    this.uiEndpoint = resolvedUi;
+
     this.project = options.project || process.env.PHOENIX_PROJECT || "mobile";
     this.timeout = options.timeout ?? 10000;
     this.showSecrets = options.showSecrets ?? false;
@@ -54,6 +67,15 @@ export class Config {
       }
     }
     this.dbPath = resolvedDb;
+  }
+
+  getSessionUrl(sessionId: string | null, threadId?: string): string {
+    const id = sessionId || threadId || "";
+    return `${this.uiEndpoint}/projects/${encodeURIComponent(this.project)}/sessions?selectedSessionId=${encodeURIComponent(id)}`;
+  }
+
+  getTraceUrl(traceId: string): string {
+    return `${this.uiEndpoint}/projects/${encodeURIComponent(this.project)}/traces/${encodeURIComponent(traceId)}`;
   }
 
   static load(options: ConfigOptions = {}): Config {

@@ -6,6 +6,7 @@
 import * as fs from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { SpanNode } from "../models.js";
+import type { PhoenixSession } from "./phoenix-api.js";
 
 interface SpanRow {
   trace_id: string;
@@ -114,6 +115,51 @@ export class PhoenixDBClient {
           attributes: parsedAttrs,
         });
       });
+    } finally {
+      db.close();
+    }
+  }
+
+  listSessions(_project = "mobile", limit = 10): PhoenixSession[] {
+    const db = new DatabaseSync(this.dbPath, { readOnly: true });
+    try {
+      const stmt = db.prepare(`
+        SELECT 
+          coalesce(json_extract(attributes, '$.session.id'), json_extract(attributes, '$.attributes.session.id'), t.trace_id) as session_id,
+          t.trace_id,
+          t.start_time,
+          t.end_time
+        FROM traces t
+        LEFT JOIN spans s ON s.trace_rowid = t.id AND s.parent_id IS NULL
+        WHERE session_id IS NOT NULL
+        GROUP BY t.trace_id
+        ORDER BY t.start_time DESC
+        LIMIT ?;
+      `);
+      const rows = stmt.all(limit) as unknown as Array<{ session_id: string; trace_id: string; start_time: string; end_time: string }>;
+
+      const map = new Map<string, PhoenixSession>();
+      for (const r of rows) {
+        const existing = map.get(r.session_id) || {
+          id: r.session_id,
+          session_id: r.session_id,
+          project_id: _project,
+          start_time: r.start_time,
+          end_time: r.end_time,
+          traces: [],
+          token_count_prompt: 0,
+          token_count_completion: 0,
+          token_count_total: 0,
+        };
+        existing.traces.push({
+          id: r.trace_id,
+          trace_id: r.trace_id,
+          start_time: r.start_time,
+          end_time: r.end_time,
+        });
+        map.set(r.session_id, existing);
+      }
+      return Array.from(map.values()).slice(0, limit);
     } finally {
       db.close();
     }
