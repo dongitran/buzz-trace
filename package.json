@@ -1,6 +1,6 @@
 {
   "name": "buzz-trace",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "Distributed Thread Observability & Diagnostic CLI for Multi-Agent Nostr Networks",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -54,6 +54,9 @@
     "url": "https://github.com/dongitran/buzz-trace/issues"
   },
   "homepage": "https://github.com/dongitran/buzz-trace#readme",
+  "dependencies": {
+    "gpt-tokenizer": "^4.1.0"
+  },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "@typescript-eslint/eslint-plugin": "^8.24.0",

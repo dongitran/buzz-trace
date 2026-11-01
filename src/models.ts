@@ -79,7 +79,9 @@ export type AnomalyType =
   | "TOKEN_INFLATION"
   | "SLOW_TOOL"
   | "UNHANDLED_EXCEPTION"
-  | "CLOCK_SKEW";
+  | "CLOCK_SKEW"
+  | "CAUSAL_OVERLAP"
+  | "INVALID_DURATION";
 export type AnomalySeverity = "CRITICAL" | "WARNING" | "INFO";
 
 export interface Anomaly {

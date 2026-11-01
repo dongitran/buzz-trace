@@ -34,6 +34,32 @@ export class AnomalyDetector {
     const anomalies: Anomaly[] = [...(telemetry.anomalies || [])];
 
     for (const turn of telemetry.turns) {
+      // 0. Invalid Span Duration Check (monotonic clock jumps backward)
+      for (const span of turn.spans) {
+        if (span.startTime && span.endTime && span.startTime.getTime() > span.endTime.getTime()) {
+          const alreadyExists = anomalies.some(
+            (a) => a.type === "INVALID_DURATION" && a.details?.spanId === span.spanId,
+          );
+          if (!alreadyExists) {
+            const negativeMs = span.startTime.getTime() - span.endTime.getTime();
+            anomalies.push({
+              type: "INVALID_DURATION",
+              severity: "WARNING",
+              message: `Invalid span duration detected: span '${span.name}' has startTime (${span.startTime.toISOString()}) later than endTime (${span.endTime.toISOString()}) by ${negativeMs}ms due to monotonic clock jump.`,
+              turnIndex: turn.turnIndex,
+              traceId: turn.traceId,
+              details: {
+                spanId: span.spanId,
+                spanName: span.name,
+                negativeDurationMs: -negativeMs,
+                startTime: span.startTime.toISOString(),
+                endTime: span.endTime.toISOString(),
+              },
+            });
+          }
+        }
+      }
+
       // 1. Context Canceled Check
       const msg = (turn.statusMessage || "").toLowerCase();
       let isCanceled = false;

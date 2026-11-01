@@ -9,6 +9,7 @@ export interface QueryFilterOptions {
   failuresOnly?: boolean;
   toolsOnly?: boolean;
   toolName?: string;
+  toolInput?: string;
   agentFilter?: string;
   lastN?: number;
   targetTurn?: number;
@@ -51,14 +52,22 @@ export class ThreadQueryEngine {
     }
 
     // 4. Filter by tools
-    if (options.toolsOnly || options.toolName) {
+    if (options.toolsOnly || options.toolName || options.toolInput) {
       filteredTurns = filteredTurns.filter((turn) => {
         if (turn.tools.length === 0) {
           return false;
         }
         if (options.toolName) {
           const matchName = options.toolName.toLowerCase();
-          return turn.tools.some((tool) => tool.name.toLowerCase().includes(matchName));
+          if (!turn.tools.some((tool) => tool.name.toLowerCase().includes(matchName))) {
+            return false;
+          }
+        }
+        if (options.toolInput) {
+          const matchInput = options.toolInput.toLowerCase();
+          if (!turn.tools.some((tool) => tool.inputSummary.toLowerCase().includes(matchInput))) {
+            return false;
+          }
         }
         return true;
       });

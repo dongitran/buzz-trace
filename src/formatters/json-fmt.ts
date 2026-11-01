@@ -5,6 +5,7 @@
 
 import { Config } from "../config.js";
 import { ThreadTelemetry } from "../models.js";
+import { formatCompactTool } from "./compact-fmt.js";
 
 export interface JsonRenderOptions {
   compact?: boolean;
@@ -24,15 +25,33 @@ export class JsonRenderer {
     const indent = options.flat || this.indent === 0 ? 0 : 2;
 
     if (isCompact) {
+      // In compact mode (for LLM context protection):
+      // Prune redundant anomalies whose details are already captured in turn.tools or turn.error
+      const compactAnomalies = telemetry.anomalies.filter((a) => {
+        if (
+          a.type === "TOOL_ERROR" &&
+          telemetry.turns.some((t) => (!a.turnIndex || t.turnIndex === a.turnIndex) && t.tools.some((tool) => tool.error || tool.statusCode !== "OK"))
+        ) {
+          return false;
+        }
+        if (
+          a.type === "UNHANDLED_EXCEPTION" &&
+          telemetry.turns.some((t) => (!a.turnIndex || t.turnIndex === a.turnIndex) && t.statusCode !== "OK")
+        ) {
+          return false;
+        }
+        return true;
+      });
+
       const compactPayload = {
         thread_id: telemetry.threadId,
         status: telemetry.status,
-        session_url: telemetry.phoenixSessionUrl || null,
+        ...(!options.flat && telemetry.phoenixSessionUrl ? { session_url: telemetry.phoenixSessionUrl } : {}),
         total_turns: telemetry.totalTurns,
         filtered_turns: telemetry.turns.length,
-        ...(telemetry.anomalies.length > 0
+        ...(compactAnomalies.length > 0
           ? {
-              anomalies: telemetry.anomalies.map((a) => ({
+              anomalies: compactAnomalies.map((a) => ({
                 type: a.type,
                 turn: a.turnIndex ?? undefined,
                 msg: a.message,
@@ -47,19 +66,15 @@ export class JsonRenderer {
             status: t.statusCode,
             dur_s: Number((t.durationMs / 1000).toFixed(1)),
             tokens: t.totalTokens,
-            trace_url: t.traceUrl || null,
+            ...(!options.flat && t.traceUrl ? { trace_url: t.traceUrl } : {}),
             ...(hasError && t.statusMessage ? { error: t.statusMessage } : {}),
-            ...(t.promptPreview ? { prompt: t.promptPreview.slice(0, 80) } : {}),
+            ...(t.promptPreview && !t.tools.some((tool) => tool.inputSummary === t.promptPreview)
+              ? { prompt: t.promptPreview.slice(0, 80) }
+              : {}),
             ...(t.responsePreview ? { response: t.responsePreview.slice(0, 80) } : {}),
             ...(t.tools.length > 0
               ? {
-                  tools: t.tools.map((tool) => ({
-                    name: tool.name,
-                    ok: tool.statusCode === "OK",
-                    dur_ms: Math.round(tool.durationMs),
-                    in: tool.inputSummary.slice(0, 80),
-                    ...(tool.error ? { err: tool.error } : {}),
-                  })),
+                  tools: t.tools.map((tool) => formatCompactTool(tool, 80)),
                 }
               : {}),
           };
