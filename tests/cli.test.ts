@@ -8,7 +8,7 @@ describe("CLI", () => {
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     const code = await main(["--version"]);
     expect(code).toBe(0);
-    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining("buzz-trace 0.1.3"));
+    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining("buzz-trace 0.1.4"));
     logSpy.mockRestore();
   });
 
@@ -20,7 +20,7 @@ describe("CLI", () => {
     logSpy.mockRestore();
   });
 
-  it("should execute inspect command with mock spans", async () => {
+  it("should execute inspect command with mock spans and Phoenix URLs", async () => {
     const mockSpans = [
       new SpanNode({
         span_id: "s1",
@@ -39,6 +39,34 @@ describe("CLI", () => {
     expect(code).toBe(0);
     expect(logSpy).toHaveBeenCalledWith(expect.stringContaining("test-thread-id"));
     expect(logSpy).toHaveBeenCalledWith(expect.stringContaining("phoenix-twin"));
+    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining("Phoenix UI"));
+
+    spyFetch.mockRestore();
+    logSpy.mockRestore();
+  });
+
+  it("should execute query command with --compact and --json", async () => {
+    const mockSpans = [
+      new SpanNode({
+        span_id: "s1",
+        trace_id: "t-mock",
+        name: "agent_turn",
+        span_kind: "AGENT",
+        status_code: "OK",
+        attributes: { "session.id": "test-thread-id", "agent.name": "phoenix-twin" },
+      }),
+    ];
+
+    const spyFetch = vi.spyOn(PhoenixClient.prototype, "getSpansForThread").mockResolvedValue(mockSpans);
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    const code = await main(["query", "test-thread-id", "--compact", "--json"]);
+    expect(code).toBe(0);
+    const output = logSpy.mock.calls[0][0];
+    const parsed = JSON.parse(output);
+    expect(parsed.thread_id).toBe("test-thread-id");
+    expect(parsed.turns).toHaveLength(1);
+    expect(parsed.turns[0].agent).toBe("phoenix-twin");
 
     spyFetch.mockRestore();
     logSpy.mockRestore();

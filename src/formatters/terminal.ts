@@ -68,6 +68,9 @@ export class TerminalRenderer {
     if (t.nostrChannelId) {
       lines.push(`  ${this.bold("Channel ID  :")} ${t.nostrChannelId}`);
     }
+    if (t.phoenixSessionUrl) {
+      lines.push(`  ${this.bold("Phoenix UI  :")} ${this.cyan(t.phoenixSessionUrl)}`);
+    }
     lines.push(
       `  ${this.bold("Total Tokens:")} ${this.yellow(t.totalTokens.toLocaleString())} ` +
         `(Prompt: ${t.totalPromptTokens.toLocaleString()} · Completion: ${t.totalCompletionTokens.toLocaleString()})`,
@@ -83,8 +86,14 @@ export class TerminalRenderer {
       lines.push(this.bold("-".repeat(80)));
       lines.push(`  ${this.red(this.bold("ANOMALIES & DIAGNOSTICS DETECTED:"))}`);
       for (const a of t.anomalies) {
-        const sevBadge = a.severity === "CRITICAL" ? this.red("[CRITICAL]") : this.yellow("[WARNING]");
-        lines.push(`    ${sevBadge} (Turn ${a.turnIndex}): ${a.message}`);
+        const sevBadge =
+          a.severity === "CRITICAL"
+            ? this.red("[CRITICAL]")
+            : a.severity === "WARNING"
+              ? this.yellow("[WARNING]")
+              : this.dim("[INFO]");
+        const turnRef = a.turnIndex ? `(Turn ${a.turnIndex})` : "(Thread-level)";
+        lines.push(`    ${sevBadge} ${turnRef}: ${a.message}`);
       }
       lines.push(this.bold("-".repeat(80)));
       lines.push("");
@@ -112,8 +121,15 @@ export class TerminalRenderer {
           `${this.dim(`(${durStr} · ${tokStr})`)}`,
       );
       lines.push(`  ${this.dim("│")}  ${this.bold("Trace ID :")} ${turn.traceId}`);
+      if (turn.traceUrl) {
+        lines.push(`  ${this.dim("│")}  ${this.bold("Trace URL:")} ${this.cyan(turn.traceUrl)}`);
+      }
       if (turn.nostrEventId) {
         lines.push(`  ${this.dim("│")}  ${this.bold("Event ID :")} ${turn.nostrEventId}`);
+      }
+      if (turn.parentTurnIndex) {
+        const branchTag = turn.branchId && turn.branchId !== "main" ? ` [${turn.branchId}]` : "";
+        lines.push(`  ${this.dim("│")}  ${this.bold("Reply To :")} Turn ${turn.parentTurnIndex}${branchTag}`);
       }
       lines.push(`  ${this.dim("│")}  ${this.bold("Model    :")} ${this.magenta(turn.modelName)}`);
 

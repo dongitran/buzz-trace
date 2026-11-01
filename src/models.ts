@@ -70,7 +70,16 @@ export interface ToolExecution {
   spanId: string;
 }
 
-export type AnomalyType = "CONTEXT_CANCELED" | "TOOL_LOOP" | "TOKEN_BLOAT" | "TOOL_ERROR" | "LATENCY_SPIKE";
+export type AnomalyType =
+  | "CONTEXT_CANCELED"
+  | "TOOL_LOOP"
+  | "TOKEN_BLOAT"
+  | "TOOL_ERROR"
+  | "LATENCY_SPIKE"
+  | "TOKEN_INFLATION"
+  | "SLOW_TOOL"
+  | "UNHANDLED_EXCEPTION"
+  | "CLOCK_SKEW";
 export type AnomalySeverity = "CRITICAL" | "WARNING" | "INFO";
 
 export interface Anomaly {
@@ -82,13 +91,36 @@ export interface Anomaly {
   details?: Record<string, unknown>;
 }
 
+export interface ThreadDAGEdge {
+  fromTurnIndex: number;
+  toTurnIndex: number;
+  type: "REPLY_TO" | "TEMPORAL";
+}
+
+export interface ThreadBranch {
+  branchId: string;
+  rootTurnIndex: number;
+  turnIndices: number[];
+}
+
+export interface ThreadDAG {
+  rootIndices: number[];
+  edges: ThreadDAGEdge[];
+  branches: ThreadBranch[];
+}
+
 export interface AgentTurn {
   turnIndex: number;
   traceId: string;
+  traceUrl?: string | null;
   agentName: string;
   modelName: string;
   nostrEventId?: string | null;
   nostrReplyTo?: string | null;
+  parentTurnIndex?: number | null;
+  depth?: number;
+  branchId?: string;
+  childrenTurnIndices?: number[];
   startTime?: Date;
   endTime?: Date;
   durationMs: number;
@@ -110,6 +142,8 @@ export interface ThreadTelemetryJSON {
   session_id: string | null;
   nostr_thread_id?: string | null;
   nostr_channel_id?: string | null;
+  phoenix_ui_url?: string | null;
+  phoenix_session_url?: string | null;
   total_turns: number;
   total_tokens: number;
   total_prompt_tokens: number;
@@ -118,6 +152,19 @@ export interface ThreadTelemetryJSON {
   start_time: string | null;
   end_time: string | null;
   status: string;
+  dag?: {
+    root_indices: number[];
+    edges: Array<{
+      from_turn_index: number;
+      to_turn_index: number;
+      type: string;
+    }>;
+    branches: Array<{
+      branch_id: string;
+      root_turn_index: number;
+      turn_indices: number[];
+    }>;
+  };
   anomalies: Array<{
     type: string;
     severity: string;
@@ -128,7 +175,12 @@ export interface ThreadTelemetryJSON {
   }>;
   turns: Array<{
     turn_index: number;
+    parent_turn_index?: number | null;
+    depth?: number;
+    branch_id?: string;
+    children_turn_indices?: number[];
     trace_id: string;
+    trace_url?: string | null;
     agent: string;
     model: string;
     status: string;
@@ -159,6 +211,8 @@ export class ThreadTelemetry {
   sessionId: string | null;
   nostrThreadId?: string | null;
   nostrChannelId?: string | null;
+  phoenixUiUrl?: string | null;
+  phoenixSessionUrl?: string | null;
   totalTurns: number;
   totalTokens: number;
   totalPromptTokens: number;
@@ -167,6 +221,7 @@ export class ThreadTelemetry {
   startTime?: Date;
   endTime?: Date;
   status: string;
+  dag?: ThreadDAG;
   turns: AgentTurn[];
   anomalies: Anomaly[];
 
@@ -176,6 +231,8 @@ export class ThreadTelemetry {
     this.sessionId = init.sessionId || null;
     this.nostrThreadId = init.nostrThreadId || null;
     this.nostrChannelId = init.nostrChannelId || null;
+    this.phoenixUiUrl = init.phoenixUiUrl || null;
+    this.phoenixSessionUrl = init.phoenixSessionUrl || null;
     this.totalTurns = init.totalTurns || 0;
     this.totalTokens = init.totalTokens || 0;
     this.totalPromptTokens = init.totalPromptTokens || 0;
@@ -184,6 +241,7 @@ export class ThreadTelemetry {
     this.startTime = init.startTime;
     this.endTime = init.endTime;
     this.status = init.status || "OK";
+    this.dag = init.dag;
     this.turns = init.turns || [];
     this.anomalies = init.anomalies || [];
   }
@@ -195,6 +253,8 @@ export class ThreadTelemetry {
       session_id: this.sessionId,
       nostr_thread_id: this.nostrThreadId || null,
       nostr_channel_id: this.nostrChannelId || null,
+      phoenix_ui_url: this.phoenixUiUrl || null,
+      phoenix_session_url: this.phoenixSessionUrl || null,
       total_turns: this.totalTurns,
       total_tokens: this.totalTokens,
       total_prompt_tokens: this.totalPromptTokens,
@@ -203,6 +263,21 @@ export class ThreadTelemetry {
       start_time: this.startTime ? this.startTime.toISOString() : null,
       end_time: this.endTime ? this.endTime.toISOString() : null,
       status: this.status,
+      dag: this.dag
+        ? {
+            root_indices: this.dag.rootIndices,
+            edges: this.dag.edges.map((e) => ({
+              from_turn_index: e.fromTurnIndex,
+              to_turn_index: e.toTurnIndex,
+              type: e.type,
+            })),
+            branches: this.dag.branches.map((b) => ({
+              branch_id: b.branchId,
+              root_turn_index: b.rootTurnIndex,
+              turn_indices: b.turnIndices,
+            })),
+          }
+        : undefined,
       anomalies: this.anomalies.map((a) => ({
         type: a.type,
         severity: a.severity,
@@ -213,7 +288,12 @@ export class ThreadTelemetry {
       })),
       turns: this.turns.map((t) => ({
         turn_index: t.turnIndex,
+        parent_turn_index: t.parentTurnIndex ?? null,
+        depth: t.depth ?? 0,
+        branch_id: t.branchId || "main",
+        children_turn_indices: t.childrenTurnIndices || [],
         trace_id: t.traceId,
+        trace_url: t.traceUrl || null,
         agent: t.agentName,
         model: t.modelName,
         status: t.statusCode,
