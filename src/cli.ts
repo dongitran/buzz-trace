@@ -12,10 +12,13 @@ import { parseArgs } from "node:util";
 import { PhoenixClient, PhoenixDBClient, type PhoenixSession } from "./clients/index.js";
 import { Config, ConfigOptions } from "./config.js";
 import { ThreadAggregator, AnomalyDetector, ThreadQueryEngine, TraceDiffer, ContextSummarizer } from "./engine/index.js";
+import { createRequire } from "node:module";
 import { JsonRenderer, MarkdownRenderer, TerminalRenderer } from "./formatters/index.js";
 import { SpanNode, ThreadTelemetry } from "./models.js";
 
-const VERSION = "0.1.7";
+const require = createRequire(import.meta.url);
+const pkg = require("../package.json") as { version: string };
+const VERSION = pkg.version || "0.1.9";
 
 const HELP_TEXT = `
 buzz-trace ${VERSION}
