@@ -87,7 +87,26 @@ buzz-trace query a519f713... --cmd "git status" --compact --json
 buzz-trace query a519f713... --tool-input "buzz messages send" --compact --flat
 ```
 
-### 4. Install Global AI Skill
+### 4. Next-Gen Differential Trace Analysis (`buzz-trace diff`)
+Compare two agent turns, prompt runs, or model variants to detect latency regressions and tool failures:
+```bash
+# Compare Turn 1 vs Turn 2 within a thread
+buzz-trace diff <thread_id>#1 <thread_id>#2 --flat
+
+# Compare two distinct traces
+buzz-trace diff <trace1> <trace2> --flat
+```
+Outputs model changes, $\Delta$ latency (ms), $\Delta$ token counts, tool execution count diffs, and tool status transitions.
+
+### 5. Adaptive Context Summarizer Under Strict Token Budgets (`buzz-trace context`)
+Auto-trims thread history to fit within a strict token budget (e.g. 200 or 500 tokens) for autonomous AI context windows:
+```bash
+# Auto-trims to fit within exactly 200 tokens
+buzz-trace context <thread_id> --budget 200 --flat
+```
+Prioritizes: (1) Root user intent, (2) Latest turn outcome, (3) Failed tools and error diagnostics, while pruning successful intermediate chatter.
+
+### 6. Install Global AI Skill
 Integrates `buzz-trace` directly into Claude Code and cross-agent environments (`~/.claude/skills` and `~/.agents/skills`):
 ```bash
 # Install or symlink skill globally

@@ -69,9 +69,15 @@ export async function fetchThreadTelemetry(config: Config, threadId: string): Pr
   if (config.dbPath) {
     const dbClient = new PhoenixDBClient(config.dbPath);
     spans = dbClient.getSpansForThread(threadId);
-  } else {
+  }
+
+  if (spans.length === 0) {
     const apiClient = new PhoenixClient(config.endpoint, config.timeout);
-    spans = await apiClient.getSpansForThread(config.project, threadId);
+    try {
+      spans = await apiClient.getSpansForThread(config.project, threadId);
+    } catch {
+      // Ignore API errors if DB was tried or API is unavailable
+    }
   }
 
   const aggregator = new ThreadAggregator(threadId, config.project, null, config.uiEndpoint);
