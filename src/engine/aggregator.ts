@@ -149,6 +149,7 @@ export class ThreadAggregator {
     let agentName = "unknown-agent";
     let nostrEventId: string | null = null;
     let nostrReplyTo: string | null = null;
+    let nostrRootId: string | null = null;
 
     if (rootSpan) {
       const attrs = rootSpan.attributes;
@@ -160,8 +161,33 @@ export class ThreadAggregator {
         (attrs["community.agent"] as string) ||
         "phoenix-twin";
 
-      nostrEventId = (attrs["nostr.event_id"] as string) || null;
-      nostrReplyTo = (attrs["nostr.reply_to"] as string) || null;
+      nostrEventId =
+        (attrs["nostr.event_id"] as string) ||
+        (attrs["event_id"] as string) ||
+        null;
+
+      nostrReplyTo =
+        (attrs["nostr.reply_to"] as string) ||
+        (attrs["nostr.reply_to_id"] as string) ||
+        (attrs["reply_to"] as string) ||
+        null;
+
+      nostrRootId =
+        (attrs["nostr.root_id"] as string) ||
+        (attrs["nostr.thread_root_id"] as string) ||
+        (attrs["nostr.root"] as string) ||
+        null;
+
+      if (!nostrRootId && attrs["input.value"]) {
+        const inStr = String(attrs["input.value"]);
+        const rootMatch =
+          inStr.match(/Thread root:\s*([0-9a-fA-F]{64})/) ||
+          inStr.match(/root=([0-9a-fA-F]{64})/) ||
+          inStr.match(/\["e",\s*"([0-9a-fA-F]{64})",\s*".*?",\s*"root"\]/);
+        if (rootMatch) {
+          nostrRootId = rootMatch[1];
+        }
+      }
     }
 
     let modelName = "unknown-model";
@@ -256,6 +282,7 @@ export class ThreadAggregator {
       modelName,
       nostrEventId,
       nostrReplyTo,
+      nostrRootId,
       startTime: turnStart,
       endTime: turnEnd,
       durationMs: turnDuration,
@@ -308,15 +335,25 @@ export class ThreadAggregator {
     }
 
     for (const turn of rawTurns) {
-      if (turn.nostrReplyTo && eventToTurn.has(turn.nostrReplyTo)) {
-        const parent = eventToTurn.get(turn.nostrReplyTo)!;
-        if (parent !== turn) {
-          parentMap.set(turn, parent);
-          childrenMap.get(parent)!.push(turn);
-          inDegree.set(turn, (inDegree.get(turn) || 0) + 1);
+      let parent: AgentTurn | undefined;
 
-          // Clock skew check: causal parent should precede child chronologically
-          if (parent.startTime && turn.startTime) {
+      // 1. Primary: Direct reply_to match
+      if (turn.nostrReplyTo && eventToTurn.has(turn.nostrReplyTo)) {
+        parent = eventToTurn.get(turn.nostrReplyTo);
+      }
+      // 2. Secondary fallback: If reply_to points to an assistant response or relayed event ID not directly in eventToTurn,
+      // but turn has a valid root tag referencing an event in this thread:
+      else if (turn.nostrRootId && eventToTurn.has(turn.nostrRootId)) {
+        parent = eventToTurn.get(turn.nostrRootId);
+      }
+
+      if (parent && parent !== turn) {
+        parentMap.set(turn, parent);
+        childrenMap.get(parent)!.push(turn);
+        inDegree.set(turn, (inDegree.get(turn) || 0) + 1);
+
+        // Clock skew check: causal parent should precede child chronologically
+        if (parent.startTime && turn.startTime) {
             const parentTime = parent.startTime.getTime();
             const childTime = turn.startTime.getTime();
             const parentEndTime = parent.endTime ? parent.endTime.getTime() : parentTime;
@@ -355,7 +392,6 @@ export class ThreadAggregator {
           }
         }
       }
-    }
 
     // Helper for deterministic tie-breaking (timestamp first, then event/trace ID)
     const compareTurns = (a: AgentTurn, b: AgentTurn): number => {

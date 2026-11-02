@@ -21,8 +21,28 @@ interface SpanRow {
   attributes: string | null;
 }
 
+function flattenAttributes(
+  obj: Record<string, unknown>,
+  prefix = "",
+  res: Record<string, unknown> = {},
+): Record<string, unknown> {
+  for (const [key, value] of Object.entries(obj)) {
+    const newKey = prefix ? `${prefix}.${key}` : key;
+    if (value && typeof value === "object" && !Array.isArray(value) && !(value instanceof Date)) {
+      flattenAttributes(value as Record<string, unknown>, newKey, res);
+    } else {
+      res[newKey] = value;
+    }
+    if (!prefix) {
+      res[key] = value;
+    }
+  }
+  return res;
+}
+
 export class PhoenixDBClient {
   readonly dbPath: string;
+  private dbInstance: DatabaseSync | null = null;
 
   constructor(dbPath: string) {
     const filePath = dbPath.replace(/^file:/, "").split("?")[0];
@@ -32,14 +52,29 @@ export class PhoenixDBClient {
     this.dbPath = filePath;
   }
 
+  private getDb(): DatabaseSync {
+    if (!this.dbInstance) {
+      this.dbInstance = new DatabaseSync(this.dbPath, { readOnly: true });
+      this.dbInstance.exec("PRAGMA busy_timeout = 5000;");
+      this.dbInstance.exec("PRAGMA query_only = ON;");
+    }
+    return this.dbInstance;
+  }
+
+  close(): void {
+    if (this.dbInstance) {
+      try {
+        this.dbInstance.close();
+      } catch {}
+      this.dbInstance = null;
+    }
+  }
+
   getSpansForThread(threadId: string): SpanNode[] {
     const cleanId = threadId.trim();
-    const db = new DatabaseSync(this.dbPath, { readOnly: true });
-    try {
-      db.exec("PRAGMA busy_timeout = 5000;");
-      db.exec("PRAGMA query_only = ON;");
+    const db = this.getDb();
 
-      // 1. Identify all trace IDs associated with this thread / session / event via UNION covering index optimization
+    // 1. Identify all trace IDs associated with this thread / session / event via UNION covering index optimization
       const traceQuery = `
         SELECT t.id
         FROM traces t
@@ -89,18 +124,24 @@ export class PhoenixDBClient {
         let parsedAttrs: Record<string, unknown> = {};
         if (row.attributes) {
           try {
-            parsedAttrs = JSON.parse(row.attributes);
+            parsedAttrs = flattenAttributes(JSON.parse(row.attributes));
           } catch {
             // Ignore JSON parse error
           }
         }
+
+        const openInferenceKind = parsedAttrs["openinference.span.kind"] as string | undefined;
+        const resolvedKind =
+          row.span_kind === "SPAN_KIND_INTERNAL" && openInferenceKind
+            ? openInferenceKind
+            : row.span_kind || openInferenceKind || "SPAN_KIND_INTERNAL";
 
         return new SpanNode({
           span_id: row.span_id,
           trace_id: row.trace_id,
           parent_id: row.parent_id,
           name: row.name,
-          span_kind: row.span_kind,
+          span_kind: resolvedKind,
           start_time: row.start_time || undefined,
           end_time: row.end_time || undefined,
           status_code: row.status_code || "OK",
@@ -108,17 +149,11 @@ export class PhoenixDBClient {
           attributes: parsedAttrs,
         });
       });
-    } finally {
-      db.close();
-    }
   }
 
   listSessions(_project = "mobile", limit = 10): PhoenixSession[] {
-    const db = new DatabaseSync(this.dbPath, { readOnly: true });
-    try {
-      db.exec("PRAGMA busy_timeout = 5000;");
-      db.exec("PRAGMA query_only = ON;");
-      const stmt = db.prepare(`
+    const db = this.getDb();
+    const stmt = db.prepare(`
         SELECT 
           coalesce(json_extract(attributes, '$.session.id'), json_extract(attributes, '$.attributes.session.id'), t.trace_id) as session_id,
           t.trace_id,
@@ -155,8 +190,5 @@ export class PhoenixDBClient {
         map.set(r.session_id, existing);
       }
       return Array.from(map.values()).slice(0, limit);
-    } finally {
-      db.close();
-    }
   }
 }

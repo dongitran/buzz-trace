@@ -22,6 +22,19 @@ export interface SpanNodeData {
   attributes?: Record<string, unknown>;
 }
 
+export function flattenAttributes(obj: Record<string, unknown>, prefix = ""): Record<string, unknown> {
+  const res: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(obj)) {
+    const key = prefix ? `${prefix}.${k}` : k;
+    if (v && typeof v === "object" && !Array.isArray(v) && !(v instanceof Date)) {
+      Object.assign(res, flattenAttributes(v as Record<string, unknown>, key));
+    } else {
+      res[key] = v;
+    }
+  }
+  return res;
+}
+
 export class SpanNode {
   spanId: string;
   traceId: string;
@@ -43,7 +56,8 @@ export class SpanNode {
     this.parentId = data.parent_id || null;
     this.statusCode = data.status_code || "OK";
     this.statusMessage = data.status_message || null;
-    this.attributes = data.attributes || {};
+    const rawAttrs = data.attributes || {};
+    this.attributes = { ...flattenAttributes(rawAttrs), ...rawAttrs };
 
     if (data.start_time) {
       this.startTime = new Date(data.start_time);
@@ -119,6 +133,7 @@ export interface AgentTurn {
   modelName: string;
   nostrEventId?: string | null;
   nostrReplyTo?: string | null;
+  nostrRootId?: string | null;
   parentTurnIndex?: number | null;
   depth?: number;
   branchId?: string;
