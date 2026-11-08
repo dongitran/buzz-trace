@@ -19,7 +19,7 @@ import { SpanNode, ThreadTelemetry } from "./models.js";
 
 const require = createRequire(import.meta.url);
 const pkg = require("../package.json") as { version: string };
-const VERSION = pkg.version || "0.3.0";
+const VERSION = pkg.version || "0.3.1";
 
 const HELP_TEXT = `
 buzz-trace ${VERSION}

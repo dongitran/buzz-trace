@@ -5,6 +5,17 @@ All notable changes to `buzz-trace` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-11-08
+
+### Fixed
+- **The links into the Phoenix UI did not open anything.** They were `/projects/<name>/sessions?selectedSessionId=<id>` and
+  `/projects/<name>/traces/<id>`. Phoenix 21 routes a project by its global id (`UHJvamVjdDoz` is `Project:3`), not by name,
+  and its UI has no `selectedSessionId` parameter. The thread link is now `/redirects/sessions/<session id>` and a turn's
+  `/redirects/traces/<trace id>`: both routes exist in the UI and need no project id. Checked in the UI's own code (the
+  pages need a login, so not by clicking).
+- The test suite no longer depends on the machine it runs on: it runs with an empty `HOME` and none of the developer's `PHOENIX_*`
+  variables (a test had found a real `~/.phoenix/phoenix.db` and passed or failed with it).
+
 ## [0.3.0] - 2026-11-08
 
 Run on the four real ba threads (15 messages): parent links right for 14 of 15 from Phoenix alone, 15 of 15 with the

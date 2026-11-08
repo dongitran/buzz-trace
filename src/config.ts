@@ -81,13 +81,18 @@ export class Config {
     this.dbPath = resolvedDb;
   }
 
+  /**
+   * A thread's page in the Phoenix UI. Phoenix routes a project by its global id, not its name, so the link goes through
+   * the redirect that finds the session by the id the spans carry (the thread root).
+   */
   getSessionUrl(sessionId: string | null, threadId?: string): string {
     const id = sessionId || threadId || "";
-    return `${this.uiEndpoint}/projects/${encodeURIComponent(this.project)}/sessions?selectedSessionId=${encodeURIComponent(id)}`;
+    return `${this.uiEndpoint}/redirects/sessions/${encodeURIComponent(id)}`;
   }
 
+  /** One turn's trace page, through the redirect that finds the trace by its id. */
   getTraceUrl(traceId: string): string {
-    return `${this.uiEndpoint}/projects/${encodeURIComponent(this.project)}/traces/${encodeURIComponent(traceId)}`;
+    return `${this.uiEndpoint}/redirects/traces/${encodeURIComponent(traceId)}`;
   }
 
   static load(options: ConfigOptions = {}): Config {
