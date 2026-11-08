@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `steered_event_ids` (full JSON), `msgs` (compact) and `Handled` (terminal), and a reply to one of them is an exact child
   of the turn that handled it. Seen live in ba `#consultant`: one turn of Ann answered two messages sent 12 s apart.
   Answers to the thread root, to the trigger's parent or to another turn's trigger are not counted as steering.
+- `CONTEXT_GROWTH` (new in 0.2.0) was a WARNING, and `--failures` lists WARNINGs, so the cheapest health check returned a
+  turn for a thread that had failed nothing. It is now INFO, and a WARNING only once the context per call is at least
+  half the bloat threshold (75k by default).
 
 ## [0.2.0] - 2026-11-08
 

@@ -37,7 +37,7 @@ Distributed thread observability, AI query engine, and telemetry diagnostic CLI 
 | Inspect specific turn details | `buzz-trace query <thread_id> --turn <N> --tools --compact --json` | ~150 tokens |
 | Filter by specific agent | `buzz-trace query <thread_id> --agent <agent_name> --compact --json` | ~150 tokens |
 | Run automated diagnostics | `buzz-trace analyze <thread_id> --compact --json` | ~180 tokens |
-| Thread cost and who answered whom | `buzz-trace query <thread_id> --compact --json --flat` (`cost_usd`, `parent`, `edge`) | ~250 tokens |
+| Thread cost and who answered whom | `buzz-trace query <thread_id> --compact --json --flat` (`cost_usd`, `parent`, `edge`) | ~200 tokens a turn (861 for a 4-turn thread); add `--last N` |
 | Phoenix with authentication on | `PHOENIX_API_KEY=… buzz-trace query <thread_id> --project <community>` or `--db <copy of phoenix.db>` | same |
 | Full human-readable terminal view | `buzz-trace inspect <thread_id> [--project <community>]` | Terminal UI |
 | Watch live thread execution | `buzz-trace watch <thread_id> [--interval 2.0]` | Interactive |
@@ -209,7 +209,7 @@ buzz-trace context <thread_id> --budget 200 --flat
 
 ---
 
-### 8. Who Answered Whom, and What It Cost (<250 tokens)
+### 8. Who Answered Whom, and What It Cost (~200 tokens a turn)
 
 ```bash
 buzz-trace query <thread_id> --compact --json --flat --project <community>

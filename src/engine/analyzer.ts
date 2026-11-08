@@ -270,7 +270,8 @@ export class AnomalyDetector {
         const perRound = Math.round(delta / rounds);
         anomalies.push({
           type: "CONTEXT_GROWTH",
-          severity: "WARNING",
+          // Growth is a cost observation, not a failure (--failures lists WARNINGs): it warns only once the context is large.
+          severity: lastContext >= this.tokenBloatThreshold / 2 ? "WARNING" : "INFO",
           message:
             `Context per model call of ${agent} grew from ~${firstContext.toLocaleString()} (Turn ${first.turnIndex}) to ` +
             `~${lastContext.toLocaleString()} (Turn ${last.turnIndex}), about +${perRound.toLocaleString()} a round: ` +

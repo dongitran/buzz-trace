@@ -6,6 +6,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { ThreadAggregator } from "../src/engine/aggregator.js";
+import { ThreadQueryEngine } from "../src/engine/query.js";
 import { AnomalyDetector } from "../src/engine/analyzer.js";
 import { JsonRenderer } from "../src/formatters/json-fmt.js";
 import { TerminalRenderer } from "../src/formatters/terminal.js";
@@ -147,9 +148,23 @@ describe("anomalies judged on the context of one call", () => {
     const growth = new AnomalyDetector().analyze(t).filter((a) => a.type === "CONTEXT_GROWTH");
     expect(growth).toHaveLength(1);
     expect(growth[0].turnIndex).toBe(4);
-    expect(growth[0].severity).toBe("WARNING");
+    // Growth to ~72k is worth saying but is not a failure: only a context that has become large is a WARNING.
+    expect(growth[0].severity).toBe("INFO");
     expect(growth[0].details).toMatchObject({ agent: "paul", firstTurn: 1, lastTurn: 4, firstContext: 23059, lastContext: 72291 });
     expect(growth[0].message).toMatch(/23,059.*72,291/);
+  });
+
+  it("raises growth to a WARNING once the context per call is large", () => {
+    const t = of(turnOf(1, "paul", 69000, 3), turnOf(2, "paul", 160000, 3), turnOf(3, "paul", 280000, 3), turnOf(4, "paul", 330000, 3));
+    const growth = new AnomalyDetector().analyze(t).find((a) => a.type === "CONTEXT_GROWTH");
+    expect(growth?.severity).toBe("WARNING");
+  });
+
+  it("a thread whose only finding is context growth is not a failing thread", () => {
+    const t = of(turnOf(1, "paul", 69177, 3), turnOf(2, "paul", 120412, 3), turnOf(3, "paul", 170112, 3), turnOf(4, "paul", 144581, 2));
+    t.anomalies = new AnomalyDetector().analyze(t);
+    const failing = new ThreadQueryEngine().filter(t, { failuresOnly: true });
+    expect(failing.turns).toEqual([]);
   });
 
   it("does not flag two turns, a flat context, or two agents each with little growth", () => {
