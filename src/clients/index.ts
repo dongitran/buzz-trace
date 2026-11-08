@@ -1,6 +1,6 @@
 /**
- * Client exports for Arize Phoenix REST API and SQLite reader.
+ * Client exports for the Arize Phoenix REST API.
  */
 
 export * from "./phoenix-api.js";
-export * from "./phoenix-db.js";
+export * from "./phoenix-auth.js";

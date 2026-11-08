@@ -46,4 +46,41 @@ describe("buzz-trace SKILL.md", () => {
     expect(content).toContain("--compact --json");
     expect(content).toContain("buzz-trace install-skill");
   });
+
+  it("describes the contract names and the honest edges, and no longer a source other than Phoenix's server", () => {
+    const content = fs.readFileSync(skillPath, "utf8");
+    for (const name of ["nostr.posted_event_id", "event_id <hex>", "`steer`", "candidates", "ambiguous", "steered messages are not recorded"]) {
+      expect(content, name).toContain(name);
+    }
+    expect(content).not.toMatch(/--messages|--db|sqlite|phoenix\.db/i);
+  });
+});
+
+describe("what the docs and the code say about sources", () => {
+  const root = findPackageRoot();
+  const read = (file: string) => fs.readFileSync(path.join(root, file), "utf8");
+
+  it("README says the same contract names as src/contract.ts, and mentions no removed source", () => {
+    const readme = read("README.md");
+    const contract = read("src/contract.ts");
+    for (const name of ["nostr.posted_event_id", "steer.priority", "nostr.sender_name"]) {
+      expect(contract).toContain(name);
+      expect(readme).toContain(name);
+    }
+    expect(readme).not.toMatch(/--messages|--db|sqlite|phoenix\.db|PHOENIX_DB_PATH/i);
+  });
+
+  it("no source file reads a database or a relay: Phoenix's server is the only source", () => {
+    const walk = (dir: string): string[] =>
+      fs.readdirSync(path.join(root, dir), { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(path.join(dir, e.name)) : [path.join(dir, e.name)]));
+    for (const file of walk("src").filter((f) => f.endsWith(".ts"))) {
+      const code = read(file);
+      expect(code, file).not.toMatch(/node:sqlite|DatabaseSync|better-sqlite|WebSocket|nostr-tools|buzz messages thread/);
+    }
+  });
+
+  it("the package declares no dependency on a database driver or a Nostr client", () => {
+    const pkg = JSON.parse(read("package.json")) as { dependencies?: Record<string, string> };
+    expect(Object.keys(pkg.dependencies ?? {})).toEqual(["gpt-tokenizer"]);
+  });
 });

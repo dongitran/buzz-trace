@@ -9,17 +9,16 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { PhoenixClient, PhoenixDBClient, type PhoenixSession } from "./clients/index.js";
+import { PhoenixClient, type PhoenixSession } from "./clients/index.js";
 import { Config, ConfigOptions } from "./config.js";
 import { ThreadAggregator, AnomalyDetector, ThreadQueryEngine, TraceDiffer, ContextSummarizer } from "./engine/index.js";
-import { parseThreadMessages, type ThreadMessage } from "./engine/messages.js";
 import { createRequire } from "node:module";
 import { JsonRenderer, MarkdownRenderer, TerminalRenderer } from "./formatters/index.js";
-import { SpanNode, ThreadTelemetry } from "./models.js";
+import { ThreadTelemetry } from "./models.js";
 
 const require = createRequire(import.meta.url);
 const pkg = require("../package.json") as { version: string };
-const VERSION = pkg.version || "0.3.1";
+const VERSION = pkg.version || "0.4.0";
 
 const HELP_TEXT = `
 buzz-trace ${VERSION}
@@ -39,12 +38,10 @@ COMMANDS:
   install-skill         Install buzz-trace skill to AI agent runtimes (~/.claude, ~/.agents)
 
 OPTIONS:
-  --endpoint <url>      Arize Phoenix server endpoint (default: http://localhost:6006)
+  --endpoint <url>      Arize Phoenix server (default: $PHOENIX_ENDPOINT, else $PHOENIX_URL, else http://localhost:6006)
   --ui-endpoint <url>   Arize Phoenix Web UI base URL (for clickable links)
-  --project <name>      Arize Phoenix project name (default: mobile)
-  --db <path>           Direct path to Phoenix SQLite database file (mode=ro)
-  --api-key <key>       Phoenix API key for a server with authentication on (default: $PHOENIX_API_KEY)
-  --messages <file>     The relay's thread as 'buzz messages thread ... --format json' prints it ('-' reads stdin): makes parent links exact
+  --project <name>      Arize Phoenix project (default: $PHOENIX_PROJECT; none = found from the thread)
+  --api-key <key>       Phoenix API key (default: $PHOENIX_API_KEY; prefer the variable: a flag shows in 'ps' and in history)
   --budget <num>        Token budget limit for context command (e.g. 200, 500)
   --turn1 <num>         First turn index for diff comparison
   --turn2 <num>         Second turn index for diff comparison
@@ -67,71 +64,41 @@ OPTIONS:
   --interval <sec>      Polling interval in seconds for watch command (default: 2.0)
   --help, -h            Show this help message
   --version             Show version
+
+AUTHENTICATION (a Phoenix with authentication on):
+  PHOENIX_API_KEY                       a Phoenix API key (Bearer)
+  PHOENIX_EMAIL + PHOENIX_PASSWORD      sign in instead, when there is no key (the session is refreshed when it expires)
+  Credentials are read from the environment only, and are never printed.
 `;
 
-/** The relay's thread, from a file or from stdin (`-`); a failure names the flag so it is not mistaken for a Phoenix error. */
-function loadMessages(file: string): ThreadMessage[] {
-  try {
-    const text = file === "-" ? fs.readFileSync(0, "utf-8") : fs.readFileSync(file, "utf-8");
-    return parseThreadMessages(JSON.parse(text));
-  } catch (err) {
-    throw new Error(`--messages ${file}: ${err instanceof Error ? err.message : String(err)}`);
+/** One Phoenix client per Config, so a sign-in is done once for a command (`diff` reads two threads, `watch` polls). */
+const clients = new WeakMap<Config, PhoenixClient>();
+function clientFor(config: Config): PhoenixClient {
+  let client = clients.get(config);
+  if (!client) {
+    client = new PhoenixClient(config.endpoint, config.timeout, config.credentials());
+    clients.set(config, client);
   }
-}
-
-/** `sqlite:<path> (written <UTC minute>)`: the file's age is what tells a stale copy from a live database. */
-function describeDb(db: PhoenixDBClient): string {
-  return `sqlite:${db.dbPath} (written ${db.modifiedAt().toISOString().slice(0, 16)}Z)`;
+  return client;
 }
 
 export async function fetchThreadTelemetry(config: Config, threadId: string): Promise<ThreadTelemetry> {
-  const messages = config.messagesPath ? loadMessages(config.messagesPath) : undefined;
-  let spans: SpanNode[] = [];
-  let source: string | null = null;
   const tried: string[] = [];
-  let dbLabel: string | null = null;
-  let apiError: Error | null = null;
-
-  if (config.dbPath) {
-    const dbClient = new PhoenixDBClient(config.dbPath);
-    dbLabel = describeDb(dbClient);
-    spans = dbClient.getSpansForThread(threadId);
-    if (spans.length > 0) {
-      source = `sqlite:${dbClient.dbPath}`;
-    } else {
-      tried.push(`${dbLabel}: no spans for it`);
-    }
+  let found;
+  try {
+    found = await clientFor(config).locateThread(threadId, config.project);
+  } catch (err) {
+    // Phoenix could not be asked: that is a failure to look, not a thread that is not there.
+    throw new Error(`Thread ${threadId} could not be read from Phoenix at ${config.endpoint}: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  if (found.spans.length === 0) {
+    const where = found.searched.length > 0 ? ` (looked in project${found.searched.length > 1 ? "s" : ""} ${found.searched.join(", ")})` : "";
+    tried.push(`${config.endpoint}: no spans for it${where}${found.note ? `; ${found.note}` : ""}`);
   }
 
-  if (spans.length === 0) {
-    const apiClient = new PhoenixClient(config.endpoint, config.timeout, config.apiKey);
-    try {
-      spans = await apiClient.getSpansForThread(config.project, threadId);
-      if (spans.length > 0) {
-        source = config.endpoint;
-      } else {
-        tried.push(`${config.endpoint}: no spans for it`);
-      }
-    } catch (err) {
-      apiError = err instanceof Error ? err : new Error(String(err));
-      tried.push(`${config.endpoint}: ${apiError.message}`);
-    }
-  }
-
-  // Phoenix could not be asked and nothing else had the thread: that is a failure to look, not a thread that is not there.
-  if (spans.length === 0 && apiError) {
-    throw new Error(
-      `Thread ${threadId} was not found in ${dbLabel ?? "any local database"} and Phoenix at ${config.endpoint} ` +
-        `could not be queried: ${apiError.message}`,
-    );
-  }
-
-  const aggregator = new ThreadAggregator(threadId, config.project, null, config.uiEndpoint);
-  const telemetry = aggregator.aggregate(spans, { messages });
-  telemetry.source =
-    source && telemetry.relayMessages
-      ? `${source} + relay messages (${telemetry.relayMessages.read} read, ${telemetry.relayMessages.linked} linked)`
-      : source;
+  const aggregator = new ThreadAggregator(threadId, found.project ?? config.project, null, config.uiEndpoint);
+  const telemetry = aggregator.aggregate(found.spans);
+  telemetry.source = found.spans.length > 0 ? config.endpoint : null;
   telemetry.sourcesTried = tried;
 
   // Set Phoenix Web UI deep links
@@ -358,21 +325,10 @@ export async function runContext(
 
 
 export async function runSessions(config: Config, limit = 10): Promise<number> {
-  let sessions: PhoenixSession[] = [];
+  const sessions: PhoenixSession[] = await clientFor(config).listSessions(config.project, limit);
+  const sourceLabel = config.endpoint;
 
-  let sourceLabel: string;
-
-  if (config.dbPath) {
-    const dbClient = new PhoenixDBClient(config.dbPath);
-    sessions = dbClient.listSessions(config.project, limit);
-    sourceLabel = describeDb(dbClient);
-  } else {
-    const apiClient = new PhoenixClient(config.endpoint, config.timeout, config.apiKey);
-    sessions = await apiClient.listSessions(config.project, limit);
-    sourceLabel = config.endpoint;
-  }
-
-  console.log(`\nRECENT SESSIONS · Project: ${config.project} (showing up to ${limit})`);
+  console.log(`\nRECENT SESSIONS · Project: ${config.project ?? "all projects"} (showing up to ${limit})`);
   console.log(`Source: ${sourceLabel}`);
   console.log("=".repeat(80));
 
@@ -389,7 +345,8 @@ export async function runSessions(config: Config, limit = 10): Promise<number> {
     const start = s.start_time || "N/A";
     const idx = String(i + 1).padStart(2, "0");
 
-    console.log(`[${idx}] Session: ${sid} · Traces: ${traces.length} · Tokens: ${tokens.toLocaleString()} · Started: ${start}`);
+    const where = config.project === null && s.project_name ? ` · Project: ${s.project_name}` : "";
+    console.log(`[${idx}] Session: ${sid}${where} · Traces: ${traces.length} · Tokens: ${tokens.toLocaleString()} · Started: ${start}`);
     for (const t of traces.slice(0, 3)) {
       console.log(`     ├── Trace: ${t.trace_id}`);
     }
@@ -583,9 +540,9 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     endpoint: { type: "string" as const },
     "ui-endpoint": { type: "string" as const },
     project: { type: "string" as const },
+    // Removed in 0.4.0: declared only so that using it says why it is gone, instead of "unknown option".
     db: { type: "string" as const },
     "api-key": { type: "string" as const },
-    messages: { type: "string" as const },
     json: { type: "boolean" as const, default: false },
     compact: { type: "boolean" as const, default: false },
     flat: { type: "boolean" as const, default: false },
@@ -638,6 +595,11 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     return 0;
   }
 
+  if (values.db !== undefined) {
+    console.error("Error: --db was removed in 0.4.0: buzz-trace reads the Phoenix server. Set PHOENIX_ENDPOINT (or PHOENIX_URL), or pass --endpoint.");
+    return 1;
+  }
+
   const command = positionals[0];
   const targetId = positionals[1];
 
@@ -645,9 +607,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     endpoint: values.endpoint,
     uiEndpoint: values["ui-endpoint"],
     project: values.project,
-    dbPath: values.db,
     apiKey: values["api-key"],
-    messagesPath: values.messages,
   };
   const config = Config.load(configOptions);
 

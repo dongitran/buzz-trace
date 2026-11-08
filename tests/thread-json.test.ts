@@ -41,9 +41,9 @@ describe("thread JSON", () => {
 describe("what a filter keeps", () => {
   it("keeps the source, and totals the cost of the turns kept", () => {
     const t = thread();
-    t.source = "sqlite:/data/phoenix.db";
+    t.source = "http://phoenix.example:6006";
     const last = new ThreadQueryEngine().filter(t, { lastN: 1 });
-    expect(last.source).toBe("sqlite:/data/phoenix.db");
+    expect(last.source).toBe("http://phoenix.example:6006");
     expect(last.totalCostUsd).toBeCloseTo(0.05, 6);
     const compact = JSON.parse(new JsonRenderer().render(last, { compact: true, flat: true }));
     expect(compact.cost_usd).toBeCloseTo(0.05, 6);
@@ -51,7 +51,7 @@ describe("what a filter keeps", () => {
 
   it("keeps the places that were tried for a thread that was not found", () => {
     const missing = new ThreadAggregator(ROOT, "ba").aggregate([]);
-    missing.sourcesTried = ["sqlite:/old.db (written 2026-11-02T04:46Z): no spans for it"];
+    missing.sourcesTried = ["http://phoenix.example:6006: no spans for it (looked in project ba)"];
     const filtered = new ThreadQueryEngine().filter(missing, {});
     expect(filtered.status).toBe("NOT_FOUND");
     expect(JSON.parse(new JsonRenderer().render(filtered, { compact: true, flat: true })).tried).toEqual(missing.sourcesTried);

@@ -6,6 +6,7 @@
 import { describe, expect, it } from "vitest";
 import { ThreadAggregator } from "../src/engine/aggregator.js";
 import { SpanNode } from "../src/models.js";
+import { hex } from "./helpers/phoenix-thread.js";
 
 const ROOT = "0".repeat(64);
 const id = (n: number | string) => String(n).padStart(64, "f");
@@ -111,11 +112,11 @@ describe("Buzz thread semantics", () => {
     expect(telemetry.anomalies.filter((a) => a.type === "CLOCK_SKEW" || a.type === "CAUSAL_OVERLAP")).toEqual([]);
   });
 
-  it("chains one agent's rounds, also when a person answers the agent's own reply", () => {
+  it("chains one agent's rounds; a person's answer to the agent's own reply, which no span names, picks no parent", () => {
     const spans = [
       ...turn({ trace: "t1", agent: "paul", event: ROOT, start: at(0), end: at(12), posted: { text: "a1", replyTo: ROOT } }),
       ...turn({ trace: "t2", agent: "paul", event: id(2), replyTo: ROOT, root: ROOT, start: at(22), end: at(32), posted: { text: "a2", replyTo: id(2) } }),
-      // Round 3 answers Paul's round-2 reply, an event no turn was started by.
+      // Round 3 answers a reply of Paul's that no span names: his round-1 reply or his round-2 reply.
       ...turn({ trace: "t3", agent: "paul", event: id(3), replyTo: id("a2reply"), root: ROOT, start: at(40), end: at(50), posted: { text: "a3", replyTo: id(3) } }),
       // Round 4 answers the person's own round-3 message.
       ...turn({ trace: "t4", agent: "paul", event: id(4), replyTo: id(3), root: ROOT, start: at(60), end: at(66), posted: { text: "a4", replyTo: id(4) } }),
@@ -124,7 +125,24 @@ describe("Buzz thread semantics", () => {
     expect(byAgentEvent).toEqual([
       ["paul", null, null],
       ["paul", 1, "REPLY_TO"],
-      ["paul", 2, "INFERRED"],
+      ["paul", null, "AMBIGUOUS"],
+      ["paul", 3, "REPLY_TO"],
+    ]);
+    expect(telemetry.turns[2].parentCandidates).toEqual([1, 2]);
+  });
+
+  it("chains the same rounds exactly when the reply spans record the ids they posted", () => {
+    const spans = [
+      ...turn({ trace: "t1", agent: "paul", event: ROOT, start: at(0), end: at(12), posted: { text: "a1", replyTo: ROOT, eventId: hex("a1-msg") } }),
+      ...turn({ trace: "t2", agent: "paul", event: id(2), replyTo: ROOT, root: ROOT, start: at(22), end: at(32), posted: { text: "a2", replyTo: id(2), eventId: hex("a2-msg") } }),
+      ...turn({ trace: "t3", agent: "paul", event: id(3), replyTo: hex("a2-msg"), root: ROOT, start: at(40), end: at(50), posted: { text: "a3", replyTo: id(3), eventId: hex("a3-msg") } }),
+      ...turn({ trace: "t4", agent: "paul", event: id(4), replyTo: hex("a3-msg"), root: ROOT, start: at(60), end: at(66), posted: { text: "a4", replyTo: id(4) } }),
+    ];
+    const { byAgentEvent, telemetry } = parents(spans);
+    expect(byAgentEvent).toEqual([
+      ["paul", null, null],
+      ["paul", 1, "REPLY_TO"],
+      ["paul", 2, "REPLY_TO"],
       ["paul", 3, "REPLY_TO"],
     ]);
     expect(telemetry.dag?.branches).toHaveLength(1);
@@ -148,20 +166,20 @@ describe("Buzz thread semantics", () => {
 
   it("links a reply exactly to the turn that posted it when the span records the posted event id", () => {
     const spans = [
-      ...turn({ trace: "p", agent: "paul", event: ROOT, start: at(0), end: at(8), posted: { text: "p", replyTo: ROOT, eventId: id("p-msg") } }),
-      ...turn({ trace: "k", agent: "kent", event: ROOT, start: at(0), end: at(9), posted: { text: "k", replyTo: ROOT, eventId: id("k-msg") } }),
+      ...turn({ trace: "p", agent: "paul", event: ROOT, start: at(0), end: at(8), posted: { text: "p", replyTo: ROOT, eventId: hex("p-msg") } }),
+      ...turn({ trace: "k", agent: "kent", event: ROOT, start: at(0), end: at(9), posted: { text: "k", replyTo: ROOT, eventId: hex("k-msg") } }),
       // The person answers Paul's message although Kent finished later.
-      ...turn({ trace: "p2", agent: "paul", event: id(2), replyTo: id("p-msg"), root: ROOT, start: at(20), end: at(26) }),
+      ...turn({ trace: "p2", agent: "paul", event: id(2), replyTo: hex("p-msg"), root: ROOT, start: at(20), end: at(26) }),
     ];
     const { telemetry } = parents(spans);
     const followUp = telemetry.turns.find((t) => t.traceId === "p2")!;
     const paul = telemetry.turns.find((t) => t.traceId === "p")!;
     expect(followUp.parentTurnIndex).toBe(paul.turnIndex);
     expect(followUp.parentEdgeType).toBe("REPLY_TO");
-    expect(paul.postedEventIds).toEqual([id("p-msg")]);
+    expect(paul.postedEventIds).toEqual([hex("p-msg")]);
   });
 
-  it("says when an inferred parent is ambiguous between agents that finished together", () => {
+  it("picks no parent between agents that answered the same message together: the answer could be either's", () => {
     const spans = [
       ...turn({ trace: "p", agent: "paul", event: ROOT, start: at(0), end: at(8), posted: { text: "p", replyTo: ROOT } }),
       ...turn({ trace: "k", agent: "kent", event: ROOT, start: at(0), end: at(7), posted: { text: "k", replyTo: ROOT } }),
@@ -170,8 +188,10 @@ describe("Buzz thread semantics", () => {
     const { telemetry } = parents(spans);
     const followUp = telemetry.turns.find((t) => t.traceId === "p2")!;
     const kent = telemetry.turns.find((t) => t.traceId === "k")!;
-    expect(followUp.parentEdgeType).toBe("INFERRED");
-    expect(followUp.parentAlternatives).toEqual([kent.turnIndex]);
+    const paul = telemetry.turns.find((t) => t.traceId === "p")!;
+    expect(followUp.parentEdgeType).toBe("AMBIGUOUS");
+    expect(followUp.parentTurnIndex).toBeNull();
+    expect(followUp.parentCandidates).toEqual([paul.turnIndex, kent.turnIndex].sort());
     const ambiguous = telemetry.anomalies.find((a) => a.type === "AMBIGUOUS_PARENT");
     expect(ambiguous?.turnIndex).toBe(followUp.turnIndex);
     expect(ambiguous?.severity).toBe("INFO");

@@ -5,9 +5,9 @@
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { fetchThreadTelemetry } from "../src/cli.js";
-import { PhoenixClient } from "../src/clients/phoenix-api.js";
 import { Config } from "../src/config.js";
 import { SpanNode } from "../src/models.js";
+import { mockThread } from "./helpers/mock-phoenix.js";
 
 const config = new Config({ uiEndpoint: "http://phoenix.test:6006/", project: "ba" });
 
@@ -40,7 +40,7 @@ describe("Phoenix UI links", () => {
 
   it("puts the links on the thread and on every turn", async () => {
     const span = new SpanNode({ span_id: "s1", trace_id: "trace-1", name: "agent_turn", span_kind: "AGENT", parent_id: null, attributes: { "session.id": "sess-1", "agent.name": "a" } });
-    vi.spyOn(PhoenixClient.prototype, "getSpansForThread").mockResolvedValue([span]);
+    mockThread([span]);
     const t = await fetchThreadTelemetry(new Config({ endpoint: "http://phoenix.test:6006", project: "ba" }), "sess-1");
     expect(t.phoenixSessionUrl).toBe("http://phoenix.test:6006/redirects/sessions/sess-1");
     expect(t.turns[0].traceUrl).toBe("http://phoenix.test:6006/redirects/traces/trace-1");
@@ -48,10 +48,11 @@ describe("Phoenix UI links", () => {
 });
 
 describe("the test machine", () => {
-  it("is empty: no real Phoenix database to find, no developer variables", async () => {
+  it("is empty: no developer variables, no home of the developer", async () => {
     const os = await import("node:os");
     expect(os.homedir()).toContain("buzz-trace-home-");
-    expect(new Config().dbPath).toBeNull();
-    expect(process.env.PHOENIX_API_KEY).toBeUndefined();
+    for (const name of ["PHOENIX_URL", "PHOENIX_ENDPOINT", "PHOENIX_PROJECT", "PHOENIX_API_KEY", "PHOENIX_EMAIL", "PHOENIX_PASSWORD"]) {
+      expect(process.env[name], name).toBeUndefined();
+    }
   });
 });

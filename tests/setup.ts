@@ -1,7 +1,6 @@
 /**
- * Every test runs on an empty machine: no `~/.phoenix/phoenix.db` for Config to find, no PHOENIX_* variables of the
- * developer. A test that found a real database there (it did: a copy from days ago holding a session named `sess-1`)
- * passed or failed with the machine it ran on.
+ * Every test runs on an empty machine: a home of its own and none of the developer's PHOENIX_* variables, so a test passes
+ * or fails with the code and not with the machine it runs on.
  */
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -12,11 +11,13 @@ process.env.HOME = home;
 process.env.USERPROFILE = home;
 for (const name of [
   "PHOENIX_ENDPOINT",
+  "PHOENIX_URL",
   "PHOENIX_COLLECTOR_ENDPOINT",
   "PHOENIX_UI_ENDPOINT",
   "PHOENIX_PROJECT",
-  "PHOENIX_DB_PATH",
   "PHOENIX_API_KEY",
+  "PHOENIX_EMAIL",
+  "PHOENIX_PASSWORD",
 ]) {
   delete process.env[name];
 }

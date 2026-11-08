@@ -1,8 +1,8 @@
 import * as fs from "node:fs";
 import { describe, it, expect, vi } from "vitest";
 import { main } from "../src/cli.js";
-import { PhoenixClient } from "../src/clients/phoenix-api.js";
 import { SpanNode } from "../src/models.js";
+import { mockThread } from "./helpers/mock-phoenix.js";
 
 describe("CLI", () => {
   it("should output version on --version", async () => {
@@ -34,7 +34,7 @@ describe("CLI", () => {
       }),
     ];
 
-    const spyFetch = vi.spyOn(PhoenixClient.prototype, "getSpansForThread").mockResolvedValue(mockSpans);
+    const spyFetch = mockThread(mockSpans);
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 
     const code = await main(["inspect", "test-thread-id", "--no-color"]);
@@ -59,7 +59,7 @@ describe("CLI", () => {
       }),
     ];
 
-    const spyFetch = vi.spyOn(PhoenixClient.prototype, "getSpansForThread").mockResolvedValue(mockSpans);
+    const spyFetch = mockThread(mockSpans);
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 
     const code = await main(["query", "test-thread-id", "--compact", "--json"]);
@@ -86,7 +86,7 @@ describe("CLI", () => {
       }),
     ];
 
-    const spyFetch = vi.spyOn(PhoenixClient.prototype, "getSpansForThread").mockResolvedValue(mockSpans);
+    const spyFetch = mockThread(mockSpans);
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 
     const code = await main(["query", "test-flat-id", "--compact", "--json", "--flat"]);
@@ -112,7 +112,7 @@ describe("CLI", () => {
       }),
     ];
 
-    const spyFetch = vi.spyOn(PhoenixClient.prototype, "getSpansForThread").mockResolvedValue(mockSpans);
+    const spyFetch = mockThread(mockSpans);
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 
     // Neither --json nor --compact is explicitly passed
@@ -148,7 +148,7 @@ describe("CLI", () => {
       }),
     ];
 
-    const spyFetch = vi.spyOn(PhoenixClient.prototype, "getSpansForThread").mockResolvedValue(mockSpans);
+    const spyFetch = mockThread(mockSpans);
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 
     const code = await main(["diff", "test-diff-thread#1", "test-diff-thread#2", "--flat"]);
@@ -183,7 +183,7 @@ describe("CLI", () => {
       }),
     ];
 
-    const spyFetch = vi.spyOn(PhoenixClient.prototype, "getSpansForThread").mockResolvedValue(mockSpans);
+    const spyFetch = mockThread(mockSpans);
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 
     const code = await main(["context", "test-ctx-thread", "--budget", "200", "--flat"]);

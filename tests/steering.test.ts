@@ -1,7 +1,8 @@
 /**
  * With `turn_handling: steer` a message that arrives while an agent's turn is running is injected into that turn, so it
- * never starts a trace of its own. The turn's `reply` calls still name the messages they answered, which is how the
- * extra messages show up: seen live in ba #consultant (Ann's turn answered two messages sent 12 s apart).
+ * never starts a trace of its own. Where the runtime records nothing (see steer-recording.test.ts for the `steer` span),
+ * the turn's `reply` calls still name the messages they answered, which is how the extra messages show up: seen live in
+ * ba #consultant (Ann's turn answered two messages sent 12 s apart).
  */
 import { describe, expect, it } from "vitest";
 import { ThreadAggregator } from "../src/engine/aggregator.js";
@@ -92,7 +93,9 @@ describe("a message steered into a running turn", () => {
   });
 
   it("is said in the terminal report", () => {
-    expect(new TerminalRenderer(false).render(steered())).toContain("Handled  : 2 messages (1 arrived while the turn was running)");
+    const text = new TerminalRenderer(false).render(steered());
+    expect(text).toContain("Handled  : 2 messages (1 steered)");
+    expect(text).toContain(`↳ steered ${E(4).slice(0, 8)}… (inferred from a reply call; text not recorded)`);
   });
 
   it("makes a later reply to the steered message an exact child of the turn that handled it", () => {

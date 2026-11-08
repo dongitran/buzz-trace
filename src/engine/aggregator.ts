@@ -6,8 +6,10 @@
 import {
   AgentTurn,
   Anomaly,
+  type ParentBasis,
   PostRecord,
   SpanNode,
+  SteeredMessage,
   ThreadBranch,
   ThreadDAG,
   ThreadDAGEdge,
@@ -15,16 +17,25 @@ import {
   ThreadTelemetry,
   ToolExecution,
 } from "../models.js";
+import {
+  POSTED_EVENT_ID_ATTR,
+  POSTED_EVENT_IDS_ATTR,
+  POSTED_OUTPUT_ATTRS,
+  postedIdFromOutput,
+  STEER_EVENT_ID_ATTR,
+  STEER_EVENT_NAME,
+  STEER_PRIORITY_ATTR,
+  STEER_SENDER_ATTR,
+  STEER_SPAN_NAME,
+  STEER_TEXT_ATTR,
+} from "../contract.js";
 import { extractSemanticToolInput } from "../formatters/compact-fmt.js";
 import { type BuzzEnvelope, parseBuzzEnvelope } from "./envelope.js";
-import { linkPostedMessages, type ThreadMessage } from "./messages.js";
 import { countTokens } from "../tokenizer.js";
 
 const PREVIEW_CHARS = 120;
-/** A child that starts this soon after its candidate parent ended still counts as after it (container clock drift). */
+/** A reply call that started this long after the answering turn did may still have created the message it answers (container clock drift). */
 const INFER_SKEW_TOLERANCE_MS = 2000;
-/** Candidates from other agents that ended this close to the chosen parent make an inferred parent ambiguous. */
-const AMBIGUITY_WINDOW_MS = 5000;
 const HEX64 = /^[0-9a-f]{64}$/i;
 
 /** A finite number from a span attribute, else undefined (an absent cost is not a cost of zero). */
@@ -58,25 +69,53 @@ function preview(text: string): string {
   return trimmed.length > PREVIEW_CHARS ? `${trimmed.slice(0, PREVIEW_CHARS)}...` : trimmed;
 }
 
-/** Event ids a span says its turn posted: `nostr.posted_event_id` (one) or `nostr.posted_event_ids` (list or CSV). */
-function postedIdsOf(attrs: Record<string, unknown>): string[] {
+/** Valid ids (64 hex, lower-cased) out of a value that is one id, a list of ids, or a comma-separated text of them. */
+function hexIds(value: unknown): string[] {
+  if (value === undefined || value === null) {
+    return [];
+  }
   const out: string[] = [];
   const add = (v: unknown) => {
     if (typeof v === "string") {
       for (const part of v.split(",")) {
-        const idv = part.trim();
-        if (idv) {out.push(HEX64.test(idv) ? idv.toLowerCase() : idv);}
+        const id = part.trim();
+        if (HEX64.test(id)) {
+          out.push(id.toLowerCase());
+        }
       }
     } else if (Array.isArray(v)) {
       v.forEach(add);
     }
   };
-  add(attrs["nostr.posted_event_id"]);
-  add(attrs["nostr.posted_event_ids"]);
+  add(value);
   return out;
 }
 
+/** Event ids a span says its turn posted: `nostr.posted_event_id` (one) or `nostr.posted_event_ids` (list or CSV). */
+function postedIdsOf(attrs: Record<string, unknown>): string[] {
+  return [...hexIds(attrs[POSTED_EVENT_ID_ATTR]), ...hexIds(attrs[POSTED_EVENT_IDS_ATTR])];
+}
+
+/** The id of the one message a posting call created: the attribute, else `event_id <hex>` in what the tool returned. */
+function createdIdOf(attrs: Record<string, unknown>): string | null {
+  const recorded = postedIdsOf(attrs);
+  if (recorded.length === 1) {
+    return recorded[0];
+  }
+  if (recorded.length > 1) {
+    return null;
+  }
+  for (const name of POSTED_OUTPUT_ATTRS) {
+    const id = postedIdFromOutput(attrs[name]);
+    if (id) {
+      return id;
+    }
+  }
+  return null;
+}
+
 const endMs = (t: AgentTurn) => (t.endTime ? t.endTime.getTime() : t.startTime ? t.startTime.getTime() : 0);
+const startMs = (t: AgentTurn) => (t.startTime ? t.startTime.getTime() : 0);
 
 /** Among turns started by the same message, the one a reply most likely continues: the same agent's, else the latest. */
 function pickTriggered(options: AgentTurn[], child: AgentTurn): AgentTurn {
@@ -85,73 +124,160 @@ function pickTriggered(options: AgentTurn[], child: AgentTurn): AgentTurn {
   return pool.reduce((best, t) => (endMs(t) > endMs(best) ? t : best));
 }
 
+/** What buzz-trace found out about the message a turn replies to, before turn numbers exist. */
+interface ParentResolution {
+  parent?: AgentTurn;
+  type: ThreadEdgeType | null;
+  basis: ParentBasis;
+  /** The turns the basis names (see ParentMessage.turns). */
+  turns: AgentTurn[];
+  /** The turn that posted the message, when known. */
+  postedBy?: AgentTurn;
+}
+
+/** Who could have created an unrecorded parent message: the turns whose reply calls fit, once one call = one message is applied. */
+interface Unrecorded {
+  kind: "inferred" | "ambiguous" | "none";
+  turns: AgentTurn[];
+}
+
+interface Call {
+  turn: AgentTurn;
+  post: PostRecord;
+}
+
+const sameTrigger = (a: AgentTurn, b: AgentTurn) => a === b || (Boolean(a.nostrEventId) && a.nostrEventId === b.nostrEventId);
+
+/**
+ * For every message that turns reply to and no span names (not recorded as posted, not a message that started or was
+ * taken into a turn): the turns that could have posted it. A reply call can have created the message when it did not
+ * record another id, did not fail, did not answer the message itself, started before every turn that replies to the
+ * message did (and not later than the clock-drift tolerance after it), and belongs to a turn that started earlier than
+ * those and is neither one of them nor started by the same message. A message that is the thread's root is nobody's reply.
+ * One call creates one message, so a call that is the only fit for one message is not a fit for another; if that leaves
+ * no consistent answer the plain candidates stand, and two messages that can only be the same call are both left open.
+ */
+function findUnrecordedPosters(unresolved: Map<string, AgentTurn[]>, turns: AgentTurn[]): Map<string, Unrecorded> {
+  if (unresolved.size === 0) {
+    return new Map();
+  }
+  const calls: Call[] = turns.flatMap((turn) => (turn.posts ?? []).filter((p) => p.eventId === null).map((post) => ({ turn, post })));
+  const plain = new Map<string, Set<Call>>();
+  for (const [messageId, askers] of unresolved) {
+    const askedAt = Math.min(...askers.map((a) => (a.startTime ? a.startTime.getTime() : Number.POSITIVE_INFINITY)));
+    const set = new Set<Call>();
+    for (const call of calls) {
+      const earlier = askers.every((a) => !a.startTime || !call.turn.startTime || call.turn.startTime.getTime() < a.startTime.getTime());
+      if (
+        earlier &&
+        !askers.some((a) => sameTrigger(a, call.turn)) &&
+        call.post.replyTo !== messageId &&
+        !askers.some((a) => a.nostrEventId && call.post.replyTo === a.nostrEventId) &&
+        call.post.start <= askedAt + INFER_SKEW_TOLERANCE_MS
+      ) {
+        set.add(call);
+      }
+    }
+    plain.set(messageId, set);
+  }
+
+  // Unit propagation: a message with one possible call takes it, and no other message can have that call.
+  const work = new Map([...plain].map(([id, set]) => [id, new Set(set)]));
+  const taken = new Set<string>();
+  let conflict = false;
+  for (let changed = true; changed && !conflict; ) {
+    changed = false;
+    for (const [id, set] of work) {
+      if (taken.has(id) || set.size !== 1) {
+        continue;
+      }
+      taken.add(id);
+      const [call] = [...set];
+      for (const [other, rest] of work) {
+        if (other !== id && rest.delete(call)) {
+          changed = true;
+          conflict = conflict || rest.size === 0;
+        }
+      }
+    }
+  }
+  const final = conflict ? plain : work;
+
+  // Two messages that can each only be one and the same call: at least one was not posted by an agent, and which is unknown.
+  const soleOwners = new Map<Call, string[]>();
+  for (const [id, set] of final) {
+    if (set.size === 1) {
+      const [call] = [...set];
+      soleOwners.set(call, [...(soleOwners.get(call) ?? []), id]);
+    }
+  }
+
+  const out = new Map<string, Unrecorded>();
+  for (const [id, set] of final) {
+    const owners = new Set<AgentTurn>([...set].map((c) => c.turn));
+    const list = [...owners].sort((a, b) => startMs(a) - startMs(b) || a.traceId.localeCompare(b.traceId));
+    const contested = set.size === 1 && (soleOwners.get([...set][0])?.length ?? 0) > 1;
+    out.set(id, list.length === 0 ? { kind: "none", turns: [] } : list.length === 1 && !contested ? { kind: "inferred", turns: list } : { kind: "ambiguous", turns: list });
+  }
+  return out;
+}
+
+interface ParentIndexes {
+  byTrigger: Map<string, AgentTurn[]>;
+  byPosted: Map<string, AgentTurn>;
+  bySteered: Map<string, AgentTurn>;
+  unrecorded: Map<string, Unrecorded>;
+}
+
 /**
  * The turn a turn continues, and how that was found (see ThreadEdgeType). A turn is never the parent of a turn the
  * same message started: those are siblings.
  */
-function resolveParent(
-  turn: AgentTurn,
-  all: AgentTurn[],
-  byTrigger: Map<string, AgentTurn[]>,
-  byPosted: Map<string, AgentTurn>,
-  bySteered: Map<string, AgentTurn>,
-): { parent?: AgentTurn; type: ThreadEdgeType | null; alternatives: AgentTurn[] } {
-  const isSiblingOrSelf = (t: AgentTurn) =>
-    t === turn || (Boolean(turn.nostrEventId) && t.nostrEventId === turn.nostrEventId);
+function resolveParent(turn: AgentTurn, idx: ParentIndexes): ParentResolution {
+  const isSiblingOrSelf = (t: AgentTurn) => sameTrigger(t, turn);
   const replyTo = turn.nostrReplyTo || null;
   const root = turn.nostrRootId || null;
 
-  // 1. Exact: it answers a message a turn posted, or a message that started another turn.
+  // 1. Exact: it answers a message a turn posted (recorded), a message that started other turns, or one a turn took in.
   if (replyTo) {
-    const poster = byPosted.get(replyTo);
+    const poster = idx.byPosted.get(replyTo);
     if (poster && !isSiblingOrSelf(poster)) {
-      return { parent: poster, type: "REPLY_TO", alternatives: [] };
+      return { parent: poster, type: "REPLY_TO", basis: "posted", turns: [poster], postedBy: poster };
     }
-    const started = (byTrigger.get(replyTo) || []).filter((t) => !isSiblingOrSelf(t));
+    const started = (idx.byTrigger.get(replyTo) || []).filter((t) => !isSiblingOrSelf(t));
     if (started.length > 0) {
-      return { parent: pickTriggered(started, turn), type: "REPLY_TO", alternatives: [] };
+      return { parent: pickTriggered(started, turn), type: "REPLY_TO", basis: "started", turns: started };
     }
-    // A message steered into a running turn started no turn, but that turn answered it.
-    const handler = bySteered.get(replyTo);
+    // A message steered into a running turn started no turn, but that turn handled it.
+    const handler = idx.bySteered.get(replyTo);
     if (handler && !isSiblingOrSelf(handler)) {
-      return { parent: handler, type: "REPLY_TO", alternatives: [] };
+      return { parent: handler, type: "REPLY_TO", basis: "steered", turns: [handler] };
     }
   }
 
-  // 2. Inferred: a reply inside a thread to an event no turn is known for — in a Buzz thread, almost always an agent's
-  // own reply. The latest turn of this thread that had finished by then (and posted something, when any did) wrote it.
+  // 2. A message no span names — in a Buzz thread, almost always an agent's own reply. The turns whose reply calls could
+  // have created it: one is a deduction (INFERRED), several are listed and none is picked (AMBIGUOUS).
   const inThread = Boolean(root) && root !== turn.nostrEventId;
-  const start = turn.startTime ? turn.startTime.getTime() : null;
-  if (replyTo && inThread && start !== null) {
-    const finished = all.filter(
-      (t) =>
-        !isSiblingOrSelf(t) &&
-        (t.nostrEventId === root || t.nostrRootId === root) &&
-        // A reply starts after its parent started, so the parents of inferred links can never form a cycle.
-        t.startTime !== undefined &&
-        t.startTime.getTime() < start &&
-        endMs(t) <= start + INFER_SKEW_TOLERANCE_MS,
-    );
-    const posting = finished.filter((t) => (t.postedTexts?.length ?? 0) > 0 || (t.postedEventIds?.length ?? 0) > 0);
-    const pool = (posting.length > 0 ? posting : finished).sort((a, b) => endMs(b) - endMs(a));
-    if (pool.length > 0) {
-      const chosen = pool[0];
-      const alternatives = pool
-        .slice(1)
-        .filter((t) => t.agentName !== chosen.agentName && endMs(chosen) - endMs(t) <= AMBIGUITY_WINDOW_MS);
-      return { parent: chosen, type: "INFERRED", alternatives };
+  if (replyTo && inThread) {
+    const found = idx.unrecorded.get(replyTo);
+    if (found?.kind === "inferred") {
+      return { parent: found.turns[0], type: "INFERRED", basis: "inferred", turns: found.turns, postedBy: found.turns[0] };
+    }
+    if (found?.kind === "ambiguous") {
+      return { type: "AMBIGUOUS", basis: "ambiguous", turns: found.turns };
     }
   }
 
   // 3. Only the thread's root ties it to a turn.
   if (inThread && root) {
-    const started = (byTrigger.get(root) || []).filter((t) => !isSiblingOrSelf(t));
+    const started = (idx.byTrigger.get(root) || []).filter((t) => !isSiblingOrSelf(t));
     if (started.length > 0) {
-      return { parent: pickTriggered(started, turn), type: "THREAD_ROOT", alternatives: [] };
+      const parent = pickTriggered(started, turn);
+      return { parent, type: "THREAD_ROOT", basis: "thread_root", turns: [parent] };
     }
   }
 
-  return { type: null, alternatives: [] };
+  return { type: null, basis: "unknown", turns: [] };
 }
 
 /** The command line a shell-like tool ran: a `command`/`CommandLine` parameter, or the same key inside a JSON input. */
@@ -179,10 +305,11 @@ function shellCommandOf(attrs: Record<string, unknown>): string | null {
   }
 }
 
-/** What a posting tool call wrote and which message it answered; null when the call posts nothing to the thread. */
+/** What a posting tool call wrote, which message it answered and, when recorded, which it created; null when the call posts nothing to the thread. */
 interface PostCall {
   text: string | null;
   replyTo: string | null;
+  eventId: string | null;
 }
 
 const ID_IN_FLAG = /--reply-to\s+(?:"([0-9a-fA-F]{64})"|'([0-9a-fA-F]{64})'|([0-9a-fA-F]{64}))/;
@@ -204,7 +331,11 @@ function postOf(toolName: string, attrs: Record<string, unknown>): PostCall | nu
     const pick = (...values: unknown[]) => values.find((v) => typeof v === "string" && v.trim()) as string | undefined;
     const text = pick(attrs["tool.parameters.text"], attrs["tool.parameters.content"], attrs["tool.parameters.message"], json.text, json.content, json.message);
     const target = pick(attrs["tool.parameters.reply_to"], attrs["tool.parameters.replyTo"], json.reply_to, json.replyTo);
-    return { text: text ? text.trim() : null, replyTo: target && HEX64.test(target.trim()) ? target.trim().toLowerCase() : null };
+    return {
+      text: text ? text.trim() : null,
+      replyTo: target && HEX64.test(target.trim()) ? target.trim().toLowerCase() : null,
+      eventId: createdIdOf(attrs),
+    };
   }
   const command = shellCommandOf(attrs);
   if (command && /\bbuzz\b[^\n]*\bmessages\s+send\b/.test(command)) {
@@ -214,25 +345,39 @@ function postOf(toolName: string, attrs: Record<string, unknown>): PostCall | nu
     const text = raw ? raw.replace(/…$/, "") : null;
     const target = ID_IN_FLAG.exec(command);
     const id = target ? (target[1] ?? target[2] ?? target[3]).toLowerCase() : null;
-    return { text: text && text.trim() ? text.trim() : null, replyTo: id };
+    return { text: text && text.trim() ? text.trim() : null, replyTo: id, eventId: createdIdOf(attrs) };
   }
   return null;
 }
 
+/** One steered message out of the attributes of a `steer` span or event. An id that is not 64 hex is no id. */
+function readSteer(attrs: Record<string, unknown>, at: number | null, source: "span" | "event"): SteeredMessage {
+  const text = (value: unknown) => (typeof value === "string" && value.trim() ? value.trim() : null);
+  return {
+    eventId: hexIds(attrs[STEER_EVENT_ID_ATTR])[0] ?? null,
+    text: text(attrs[STEER_TEXT_ATTR]),
+    sender: text(attrs[STEER_SENDER_ATTR]),
+    priority: text(attrs[STEER_PRIORITY_ATTR]),
+    at,
+    source,
+  };
+}
+
 export class ThreadAggregator {
   readonly threadId: string;
-  readonly project: string;
+  /** The project the thread was read from; null when it is not known (it was not named and nothing was found). */
+  readonly project: string | null;
   readonly sessionId?: string | null;
   readonly phoenixUiUrl?: string | null;
 
-  constructor(threadId: string, project = "mobile", sessionId?: string | null, phoenixUiUrl?: string | null) {
+  constructor(threadId: string, project: string | null = null, sessionId?: string | null, phoenixUiUrl?: string | null) {
     this.threadId = threadId;
     this.project = project;
     this.sessionId = sessionId;
     this.phoenixUiUrl = phoenixUiUrl;
   }
 
-  aggregate(spans: SpanNode[], options: { messages?: ThreadMessage[] } = {}): ThreadTelemetry {
+  aggregate(spans: SpanNode[]): ThreadTelemetry {
     if (!spans || spans.length === 0) {
       return new ThreadTelemetry({
         threadId: this.threadId,
@@ -242,13 +387,19 @@ export class ThreadAggregator {
       });
     }
 
-    // 1. Group spans by traceId
+    // 1. Group spans by traceId, each trace in the order its spans started (Phoenix may list them newest first).
     const tracesMap = new Map<string, SpanNode[]>();
     for (const span of spans) {
       if (span.traceId) {
         const list = tracesMap.get(span.traceId) || [];
         list.push(span);
         tracesMap.set(span.traceId, list);
+      }
+    }
+    for (const list of tracesMap.values()) {
+      const inOrder = list.every((span, i) => i === 0 || !span.startTime || !list[i - 1].startTime || list[i - 1].startTime!.getTime() <= span.startTime.getTime());
+      if (!inOrder) {
+        list.sort((a, b) => (a.startTime && b.startTime ? a.startTime.getTime() - b.startTime.getTime() : 0));
       }
     }
 
@@ -258,18 +409,34 @@ export class ThreadAggregator {
       rawTurns.push(this.buildTurn(traceId, traceSpans));
     }
 
-    // 2-. The relay's messages, when given: match each reply call with the message it created, so the event ids of what
-    // every turn posted are known and the links between turns are exact.
-    const relayMessages = options.messages ? { read: options.messages.length, linked: linkPostedMessages(rawTurns, options.messages) } : null;
-
-    // 2a. Messages a turn answered that did not start it (steered into the running turn). The thread's root, the
-    // trigger's parent and the triggers of other turns are answers to messages the thread already had a turn for.
+    // 2a. The messages each turn handled besides the one that started it (steered into the running turn). Recorded ones
+    // come from `steer` spans and events; where nothing recorded them, a reply call that answered another message shows
+    // it. The thread's root, the trigger's parent and the triggers of other turns are answers to messages the thread
+    // already had a turn for, not steering.
     const triggers = new Set(rawTurns.map((t) => t.nostrEventId).filter((id): id is string => Boolean(id)));
     for (const turn of rawTurns) {
-      turn.steeredEventIds = (turn.answeredEventIds ?? []).filter(
-        (id) => id !== turn.nostrEventId && id !== turn.nostrRootId && id !== turn.nostrReplyTo && !triggers.has(id),
+      const recorded = turn.steered ?? [];
+      if (recorded.length === 0 && (turn.answeredEventIds ?? []).length === 0) {
+        turn.steered = [];
+        turn.steeredEventIds = [];
+        turn.handledMessages = 1;
+        continue;
+      }
+      const known = new Set(recorded.map((m) => m.eventId).filter((id): id is string => Boolean(id)));
+      const inferred = (turn.answeredEventIds ?? []).filter(
+        (id) => id !== turn.nostrEventId && id !== turn.nostrRootId && id !== turn.nostrReplyTo && !triggers.has(id) && !known.has(id),
       );
+      const steered: SteeredMessage[] = [
+        ...recorded,
+        ...inferred.map((eventId) => ({ eventId, text: null, sender: null, priority: null, at: null, source: "reply_call" as const })),
+      ];
+      // In the order they arrived; one whose time is not known goes last.
+      steered.sort((a, b) => (a.at ?? Number.POSITIVE_INFINITY) - (b.at ?? Number.POSITIVE_INFINITY));
+      turn.steered = steered;
+      turn.steeredEventIds = steered.map((m) => m.eventId).filter((id): id is string => Boolean(id));
+      turn.handledMessages = 1 + steered.length;
     }
+    const steeringRecorded = spans.some((span) => span.name === STEER_SPAN_NAME || span.events.some((event) => event.name === STEER_EVENT_NAME));
 
     // 2b. Detect INVALID_DURATION (monotonic clock jumps where start_time > end_time)
     const invalidDurationAnomalies: Anomaly[] = [];
@@ -327,9 +494,7 @@ export class ThreadAggregator {
 
     const resolvedSessionId =
       this.sessionId ||
-      (turns.length > 0 && turns[0].spans.length > 0
-        ? (turns[0].spans[0].attributes["session.id"] as string)
-        : null);
+      ((turns.flatMap((t) => t.spans).find((span) => span.attributes["session.id"])?.attributes["session.id"] as string | undefined) ?? null);
 
     return new ThreadTelemetry({
       threadId: this.threadId,
@@ -349,7 +514,7 @@ export class ThreadAggregator {
       dag,
       turns,
       anomalies: orderingAnomalies,
-      relayMessages,
+      steeringRecorded,
     });
   }
 
@@ -451,12 +616,22 @@ export class ThreadAggregator {
     const postedEventIds: string[] = [];
     const answeredEventIds: string[] = [];
     const posts: PostRecord[] = [];
+    const recordedSteers: SteeredMessage[] = [];
     const toolWindows: Array<[number, number]> = [];
 
     for (const span of spans) {
       const attrs = span.attributes;
-      for (const posted of postedIdsOf(attrs)) {
-        if (!postedEventIds.includes(posted)) {postedEventIds.push(posted);}
+
+      // A message steered into the running turn, as the runtime records it: a `steer` event on any span, or a `steer`
+      // child span. It is a marker, not a tool, a model call or a prompt.
+      for (const event of span.events) {
+        if (event.name === STEER_EVENT_NAME) {
+          recordedSteers.push(readSteer(event.attributes, event.time ? event.time.getTime() : null, "event"));
+        }
+      }
+      if (span.name === STEER_SPAN_NAME) {
+        recordedSteers.push(readSteer(attrs, span.startTime ? span.startTime.getTime() : null, "span"));
+        continue;
       }
 
       // Check for LLM span
@@ -490,6 +665,15 @@ export class ThreadAggregator {
       const isToolSpan =
         span.name.startsWith("tool:") ||
         ((span.spanKind === "TOOL" || span.spanKind === "SPAN_KIND_INTERNAL") && "tool.name" in attrs);
+
+      // Ids of posted messages a span records. A call that failed created no message, whatever its span says.
+      if (!(isToolSpan && span.statusCode === "ERROR")) {
+        for (const posted of postedIdsOf(attrs)) {
+          if (!postedEventIds.includes(posted)) {
+            postedEventIds.push(posted);
+          }
+        }
+      }
 
       // Prompt and response previews (from agent turn or non-tool spans)
       if (!isToolSpan) {
@@ -532,12 +716,17 @@ export class ThreadAggregator {
           if (post?.replyTo && !answeredEventIds.includes(post.replyTo)) {
             answeredEventIds.push(post.replyTo);
           }
+          if (post?.eventId && !postedEventIds.includes(post.eventId)) {
+            postedEventIds.push(post.eventId);
+          }
           if (post && span.startTime) {
             posts.push({
+              spanId: span.spanId,
               start: span.startTime.getTime(),
               end: (span.endTime ?? span.startTime).getTime(),
               text: post.text,
               replyTo: post.replyTo,
+              eventId: post.eventId,
             });
           }
         }
@@ -545,6 +734,20 @@ export class ThreadAggregator {
     }
 
     const modelCalls = countModelCalls(toolWindows);
+
+    // The recorded steered messages: one message once (a span wins over an event), and never the one that started the turn.
+    const steered: SteeredMessage[] = [];
+    for (const message of recordedSteers) {
+      if (message.eventId && message.eventId === nostrEventId) {
+        continue;
+      }
+      const same = message.eventId ? steered.findIndex((m) => m.eventId === message.eventId) : -1;
+      if (same === -1) {
+        steered.push(message);
+      } else if (message.source === "span" && steered[same].source === "event") {
+        steered[same] = message;
+      }
+    }
 
     // What the agent posted is what the thread saw; the model's closing aside ("I replied in the thread…") is not.
     if (postedTexts.length > 0) {
@@ -568,6 +771,7 @@ export class ThreadAggregator {
       postedEventIds,
       answeredEventIds,
       posts,
+      steered,
       startTime: turnStart,
       endTime: turnEnd,
       durationMs: turnDuration,
@@ -606,8 +810,8 @@ export class ThreadAggregator {
       };
     }
 
-    // Index turns by the message that started them (several agents can be started by one message) and by the
-    // messages they posted (when telemetry records posted event ids).
+    // Index turns by the message that started them (several agents can be started by one message), by the messages
+    // they posted (when telemetry records posted event ids) and by the messages they took in while they ran.
     const byTrigger = new Map<string, AgentTurn[]>();
     const byPosted = new Map<string, AgentTurn>();
     const bySteered = new Map<string, AgentTurn>();
@@ -625,10 +829,29 @@ export class ThreadAggregator {
       }
     }
 
+    // The messages turns reply to that no span names: who could have posted each.
+    const unresolved = new Map<string, AgentTurn[]>();
+    for (const turn of rawTurns) {
+      const replyTo = turn.nostrReplyTo;
+      const root = turn.nostrRootId;
+      if (!replyTo || !root || root === turn.nostrEventId || replyTo === root) {
+        continue;
+      }
+      const poster = byPosted.get(replyTo);
+      const named =
+        (poster !== undefined && !sameTrigger(poster, turn)) ||
+        (byTrigger.get(replyTo) ?? []).some((t) => !sameTrigger(t, turn)) ||
+        (bySteered.has(replyTo) && !sameTrigger(bySteered.get(replyTo)!, turn));
+      if (!named) {
+        unresolved.set(replyTo, [...(unresolved.get(replyTo) ?? []), turn]);
+      }
+    }
+    const indexes: ParentIndexes = { byTrigger, byPosted, bySteered, unrecorded: findUnrecordedPosters(unresolved, rawTurns) };
+
     // Build dependency graph
     const parentMap = new Map<AgentTurn, AgentTurn>();
     const edgeTypes = new Map<AgentTurn, ThreadEdgeType>();
-    const alternativesMap = new Map<AgentTurn, AgentTurn[]>();
+    const resolutions = new Map<AgentTurn, ParentResolution>();
     const childrenMap = new Map<AgentTurn, AgentTurn[]>();
     const inDegree = new Map<AgentTurn, number>();
     const clockSkewAnomalies: Anomaly[] = [];
@@ -639,21 +862,22 @@ export class ThreadAggregator {
     }
 
     for (const turn of rawTurns) {
-      const { parent, type, alternatives } = resolveParent(turn, rawTurns, byTrigger, byPosted, bySteered);
+      const resolution = resolveParent(turn, indexes);
+      resolutions.set(turn, resolution);
+      const { parent, type } = resolution;
 
       if (parent && parent !== turn && type) {
         parentMap.set(turn, parent);
         edgeTypes.set(turn, type);
-        if (alternatives.length > 0) {
-          alternativesMap.set(turn, alternatives);
-        }
         childrenMap.get(parent)!.push(turn);
         inDegree.set(turn, (inDegree.get(turn) || 0) + 1);
 
         // Clock skew check: a causal parent should precede its child. Only an exact link is evidence of skew; an
-        // inferred one was chosen because it ended before the child started.
+        // inferred one was chosen because it could have posted before the child started. A turn that replies to a
+        // message the parent posted may well start while the parent is still finishing, so it is not an overlap.
         if (type === "REPLY_TO" && parent.startTime && turn.startTime) {
-            const parentTime = parent.startTime.getTime();
+            const postedAt = resolution.basis === "posted" ? parent.posts?.find((p) => p.eventId === turn.nostrReplyTo)?.start : undefined;
+            const parentTime = postedAt ?? parent.startTime.getTime();
             const childTime = turn.startTime.getTime();
             const parentEndTime = parent.endTime ? parent.endTime.getTime() : parentTime;
 
@@ -672,7 +896,7 @@ export class ThreadAggregator {
                   parentStartTime: parent.startTime.toISOString(),
                 },
               });
-            } else if (parent.endTime && childTime < parentEndTime - 100) {
+            } else if (resolution.basis !== "posted" && parent.endTime && childTime < parentEndTime - 100) {
               const overlapMs = parentEndTime - childTime;
               clockSkewAnomalies.push({
                 type: "CAUSAL_OVERLAP",
@@ -747,6 +971,7 @@ export class ThreadAggregator {
     const ambiguityAnomalies: Anomaly[] = [];
     for (const turn of sortedTurns) {
       const parent = parentMap.get(turn);
+      const resolution = resolutions.get(turn);
       if (parent) {
         const type = edgeTypes.get(turn) ?? "REPLY_TO";
         turn.parentTurnIndex = parent.turnIndex;
@@ -759,27 +984,41 @@ export class ThreadAggregator {
           toTurnIndex: turn.turnIndex,
           type,
         });
-        const alternatives = alternativesMap.get(turn) || [];
-        if (alternatives.length > 0) {
-          turn.parentAlternatives = alternatives.map((a) => a.turnIndex).sort((a, b) => a - b);
-          const others = alternatives.map((a) => `Turn ${a.turnIndex} (${a.agentName})`).join(", ");
+      } else {
+        turn.parentTurnIndex = null;
+        turn.parentEdgeType = resolution?.type === "AMBIGUOUS" ? "AMBIGUOUS" : null;
+        turn.depth = 0;
+        rootIndices.push(turn.turnIndex);
+      }
+
+      // What the message this turn replies to is known to be, in turn numbers.
+      if (turn.nostrReplyTo && resolution) {
+        const turnsNamed = resolution.turns.map((t) => t.turnIndex).sort((a, b) => a - b);
+        turn.parentMessage = {
+          id: turn.nostrReplyTo,
+          basis: resolution.basis,
+          postedByTurn: resolution.postedBy ? resolution.postedBy.turnIndex : null,
+          turns: turnsNamed,
+        };
+        if (resolution.basis === "ambiguous") {
+          turn.parentCandidates = turnsNamed;
+          const who = resolution.turns
+            .slice()
+            .sort((a, b) => a.turnIndex - b.turnIndex)
+            .map((t) => `Turn ${t.turnIndex} (${t.agentName})`)
+            .join(" or ");
           ambiguityAnomalies.push({
             type: "AMBIGUOUS_PARENT",
             severity: "INFO",
             message:
-              `Turn ${turn.turnIndex} (${turn.agentName}) answers a message no turn is known to have posted; its parent ` +
-              `was inferred as Turn ${parent.turnIndex} (${parent.agentName}), but ${others} finished at about the same ` +
-              "time. Pass the relay's thread with --messages (or record nostr.posted_event_id in the spans) to make this exact.",
+              `Turn ${turn.turnIndex} (${turn.agentName}) replies to message ${turn.nostrReplyTo.slice(0, 8)}…, which no span ` +
+              `records as posted. ${who} could have posted it, so no parent is picked. Record nostr.posted_event_id on the ` +
+              "reply spans to make this exact.",
             turnIndex: turn.turnIndex,
             traceId: turn.traceId,
-            details: { inferredParent: parent.turnIndex, alternatives: turn.parentAlternatives },
+            details: { messageId: turn.nostrReplyTo, candidates: turnsNamed },
           });
         }
-      } else {
-        turn.parentTurnIndex = null;
-        turn.parentEdgeType = null;
-        turn.depth = 0;
-        rootIndices.push(turn.turnIndex);
       }
     }
 
