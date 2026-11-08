@@ -53,10 +53,16 @@ describe("an old thread, read from a Phoenix that wants an API key", () => {
     expect(text).toContain("Source      : http://phoenix.test:6006");
   });
 
-  it("takes four requests for a thread whose project it must find, and signs in to nothing", async () => {
+  it("takes five requests for a thread whose project it must find (the last asks for annotations of the reply spans), and signs in to nothing", async () => {
     await main(["query", THREAD_C.root, "--compact", "--json", "--flat"]);
     expect(fake.count("POST", "/auth/login")).toBe(0);
-    expect(fake.calls.map((c) => c.path)).toEqual([`/v1/sessions/${THREAD_C.root}`, "/v1/projects", "/v1/projects/ba/spans", "/v1/projects/ba/spans"]);
+    expect(fake.calls.map((c) => c.path)).toEqual([
+      `/v1/sessions/${THREAD_C.root}`,
+      "/v1/projects",
+      "/v1/projects/ba/spans",
+      "/v1/projects/ba/spans",
+      "/v1/projects/ba/span_annotations",
+    ]);
     expect(fake.calls.every((c) => c.headers.authorization === `Bearer ${API_KEY}`)).toBe(true);
   });
 

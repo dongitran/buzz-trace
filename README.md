@@ -15,7 +15,7 @@
 * **One source: the Phoenix server.** buzz-trace reads Phoenix over its REST API (API key, or email and password). No relay, no `buzz` CLI, no file. It finds the project from the thread, so there is no default project to get wrong.
 * **Thread-Centric Correlation**: Unifies isolated per-turn traces across multiple agents into a single thread execution view using the Nostr root event ID (`session.id`).
 * **Multi-Agent Timeline**: Visualizes interleaved turns between different agents (`@phoenix-twin`, `@paul-twin`, etc.) with model usage, wall latency, and token consumption.
-* **Which turn posted a message**: every report shows the id of each message a turn posted (`212193a2…`) and, for a parent message, the turn that posted it. Exact when the agent's runtime records the id ([telemetry contract](#-telemetry-contract)); for older traces buzz-trace lists the turns that *could* have posted it and picks none.
+* **Which turn posted a message**: every report shows the id of each message a turn posted (`212193a2…`) and, for a parent message, the turn that posted it. Exact when the agent's runtime records the id ([telemetry contract](#-telemetry-contract)) or when someone completed an old trace with [span annotations](#completing-an-old-trace-span-annotations); otherwise buzz-trace lists the turns that *could* have posted it and picks none.
 * **Steered messages**: `Handled 4 messages (3 steered)` with each one's id and text, when the runtime records them; when it does not, the report says that steered messages are not recorded in the trace.
 * **Semantic Tool Compactor**:
   * Eliminates the 2.77x JSON escaping penalty and nested subshell backslash bloat.
@@ -73,7 +73,7 @@ buzz-trace ──────┤
 * A sign-in lasts ten minutes on a default Phoenix (its refresh token, a week), and a Phoenix may rate-limit sign-ins (buzz-trace says so on a 429): for repeated runs use an API key, which needs none.
 * Without credentials a Phoenix that wants them answers 401: buzz-trace stops with exit code 2 and says what to set. It never reports that as `NOT_FOUND`.
 
-**What a thread costs.** Two requests when the project is named (the spans that carry the session id, then every span of those traces, since a steer record need not carry it); four when buzz-trace finds the project first. Pages are read to the end (`next_cursor`) and ordered by start time. The same data through the Phoenix CLI would be one process per call (`px session get <root>` names the traces and holds no spans; `px span list --trace-id <id>` per trace; about a second to start each, 18 s and 313 MB the first time through `npx`), with no email and password login: so buzz-trace calls the REST API itself. `px` is a good way to look at the same data by hand, and `px api graphql` (or Phoenix's own `/graphql`) answers a whole session, its traces, spans and events in one request.
+**What a thread costs.** Two requests when the project is named (the spans that carry the session id, then every span of those traces, since a steer record need not carry it); four when buzz-trace finds the project first; and one more per 50 reply calls whose span records no posted id, for their [span annotations](#completing-an-old-trace-span-annotations) (none when there is no such call). Pages are read to the end (`next_cursor`) and ordered by start time. The same data through the Phoenix CLI would be one process per call (`px session get <root>` names the traces and holds no spans; `px span list --trace-id <id>` per trace; about a second to start each, 18 s and 313 MB the first time through `npx`), with no email and password login: so buzz-trace calls the REST API itself. `px` is a good way to look at the same data by hand, and `px api graphql` (or Phoenix's own `/graphql`) answers a whole session, its traces, spans and events in one request.
 
 ---
 
@@ -188,7 +188,7 @@ With the contract below, the same turn reads `Reply To : message 212193a2… pos
 
 | | Traces written before the contract | Traces that follow it |
 | :--- | :--- | :--- |
-| Id of a message a turn posted | **Not in Phoenix.** Not in the REST API, GraphQL, span events, annotations or the session and trace objects. (A message id is the hash of the whole event, and Phoenix does not hold all of it: recomputing the id from what Phoenix has did not reproduce a real one.) | `nostr.posted_event_id` on the reply span |
+| Id of a message a turn posted | **Not in Phoenix**, unless someone wrote it there afterwards as a [span annotation](#completing-an-old-trace-span-annotations). Not in the spans, their events, or the session and trace objects. (A message id is the hash of the whole event, and Phoenix does not hold all of it: recomputing the id from what Phoenix has did not reproduce a real one.) | `nostr.posted_event_id` on the reply span |
 | The turn that posted a parent message | One turn, if exactly one reply call could have created it (it started before the answering turn, did not fail, did not answer that message, and no other message needs the call): `INFERRED`. Several: the **candidates are listed and none is picked** (`AMBIGUOUS`). Checked by hand on five real ba threads against the relay's own thread (which buzz-trace never reads): of 7 such links, 5 inferred, all right; 2 ambiguous, the right turn among the candidates; none wrong | exact (`REPLY_TO`) |
 | A parent written by a person | Cannot be told from an agent's: the inference assumes the agent wrote it | not any turn's post: the report says so |
 | A message steered into a running turn | Only when a reply call answered it (seen as `inferred from a reply call`, no text); otherwise it is absent | a `steer` span, with id and text |
@@ -201,6 +201,7 @@ What an agent runtime writes to Phoenix so that buzz-trace is exact. Every name 
 | :--- | :--- | :--- |
 | Id of a posted message | attribute `nostr.posted_event_id` on the reply tool span (`mcp__buzz-thread__reply`, or any tool that posts) | 64 hex |
 | The same, from tool output | `event_id <64 hex>` in that span's `output.value` or `tool.output` (the reply tool returns `posted (N characters) · event_id <hex>`) | text |
+| The same, written afterwards | a span annotation named `nostr.posted_event_id` on the reply span ([how](#completing-an-old-trace-span-annotations)) | `result.label`: 64 hex |
 | A steered message | a child span named `steer` under the turn's `agent_turn` span, in the same trace, starting when the message was delivered; a span event named `steer` with the same attributes is read too | see below |
 
 ```jsonc
@@ -222,6 +223,36 @@ A child span is the contract rather than an event because it shows in Phoenix's 
 
 The Buzz fork writes more on a steer span, all optional for the reader: `nostr.sender_pubkey`, `steer.uuid`, `steer.delivered`, `steer.end_reason` (`echo`, `result` or `turn_end`), and a `steer_spans_capped` event on the turn when it stopped writing them. Its `input.value` is the whole block the agent was handed (a framing line, the Buzz envelope, a closing note); buzz-trace takes the envelope's `Content:` line as the message. `steer.delivered=false` means the turn ended before the message reached it: it is listed as `not delivered`, not counted and not linked to, because nothing says that any turn ran it.
 
+### Completing an old trace: span annotations
+
+A span cannot be edited, but Phoenix can hold an annotation on it. Whoever knows the ids (say, an operator who read them from the relay) writes one on each reply span, and buzz-trace then reads the id as if the span had recorded it. **buzz-trace only reads annotations; it never writes one.**
+
+```
+old reply span ◀── annotation  nostr.posted_event_id = 212193a2…         written once, afterwards
+buzz-trace ──▶ Posted   : 212193a2… (span annotation)
+               Reply To : message 212193a2… posted by Turn 1 (ba-kent-twin) — id from a span annotation
+```
+
+```jsonc
+// POST /v1/span_annotations: by whoever completes the trace, not by buzz-trace
+{ "data": [ { "span_id": "bcf49f14a6f8f402",          // the reply span (16 hex)
+              "name": "nostr.posted_event_id",
+              "annotator_kind": "CODE",
+              "identifier": "relay-backfill-v1",      // posting the same identifier again updates the annotation
+              "result": { "label": "212193a2f2f5dbd2955a43f55b191213d5c5b55b161cac89a34d8e9ca95a3773",   // the id, 64 hex
+                          "explanation": "id of the message this reply call posted, read from the relay" },
+              "metadata": { "source": "relay-backfill" } } ] }
+```
+
+| What buzz-trace does | |
+| :--- | :--- |
+| Which spans | Reply calls that did not fail and whose span records no id. One `GET /v1/projects/{project}/span_annotations` per 50 spans (`span_ids` repeated, `include_annotation_names=nostr.posted_event_id`, the cursor followed). With no such span there is no request |
+| Which id wins | the attribute, then the annotation, then `event_id <hex>` in the output text |
+| Several on one span | the latest (`updated_at`) counts. If its label is not a 64-hex id the span has none from annotations: an older one was replaced and is not used. Equally new and different: none |
+| In the report | the link is exact (`REPLY_TO`); `parent_message.basis` is `annotation`, the post has `event_id_source: "annotation"`, and the text says `id from a span annotation` |
+| Steering | An annotation says nothing about the runtime: a trace completed this way still reads `steered messages are not recorded in this trace` |
+| A Phoenix without that route | read as having no annotations (a 404); any other failure is an error |
+
 ### Steered messages
 
 With `turn_handling: steer`, a message that arrives while a turn runs is injected into it and starts no trace, so Phoenix shows one message for four. buzz-trace reads the `steer` records:
@@ -238,7 +269,7 @@ With `turn_handling: steer`, a message that arrives while a turn runs is injecte
 │    ↳ not delivered 6e1a22f0… (now) "Too late…" — the turn ended before it reached it
 ```
 
-Where nothing recorded them, a reply call that answered a message other than the opening one still shows it (`inferred from a reply call; text not recorded`). Otherwise the report says `steered messages are not recorded in this trace`, but only for a turn with no sign that its runtime writes the contract: no `steer` record, no recorded posted id (a runtime that writes ids writes steer spans), and no such turn of the same agent in the thread. A turn whose runtime does write them and had nothing steered reads plainly `Handled  : 1 message`.
+Where nothing recorded them, a reply call that answered a message other than the opening one still shows it (`inferred from a reply call; text not recorded`). Otherwise the report says `steered messages are not recorded in this trace`, but only for a turn with no sign that its runtime writes the contract: no `steer` record, no posted id that the runtime recorded (a runtime that writes ids writes steer spans; an id that only a span annotation gives does not count, someone wrote it afterwards), and no such turn of the same agent in the thread. A turn whose runtime does write them and had nothing steered reads plainly `Handled  : 1 message`.
 
 ---
 
@@ -246,14 +277,14 @@ Where nothing recorded them, a reply call that answered a message other than the
 
 | Field | Meaning |
 | :--- | :--- |
-| `posted_event_ids`, `posts[]` | ids of the messages each turn posted (when recorded), and each reply call: `event_id` (or null), `reply_to`, `text`, `at` |
+| `posted_event_ids`, `posts[]` | ids of the messages each turn posted (when recorded), and each reply call: `event_id` (or null), `reply_to`, `text`, `at`, and `event_id_source: "annotation"` when the id was read from a span annotation |
 | `answered_event_ids` | the messages the turn's reply calls answered |
 | `handled_messages`, `steered[]` | messages the turn handled, and the steered ones: `event_id`, `text`, `sender`, `sender_pubkey`, `priority`, `at`, `source` (`span`, `event` or `reply_call`), and, when recorded, `delivered` (false: not counted) and `end_reason`; `steered_capped` when the list is cut off |
-| `parent_message` | `{ id, basis, posted_by_turn, turns }`; `basis` is `posted`, `started`, `steered`, `inferred`, `ambiguous`, `thread_root` or `unknown` |
+| `parent_message` | `{ id, basis, posted_by_turn, turns }`; `basis` is `posted`, `annotation` (the same, the id from a span annotation), `started`, `steered`, `inferred`, `ambiguous`, `thread_root` or `unknown` |
 | `parent_edge`: `AMBIGUOUS`, `parent_candidates` | no parent is picked; the turns that could have posted the parent message |
 | `steering`, `steering_recorded` | whether a steered message would show in the trace: `recorded` or `not_recorded` for the thread, and `true` or `false` for each turn |
 
-Compact output (`--compact --json`) adds, only when they apply: `parent_msg` and `posted_ids` (the first 8 hex), `edge: "ambiguous"` with `candidates`, `msgs` and `steered` (with `not_delivered` and `steered_capped` beside them), and a thread-level `steering: "not_recorded"`.
+Compact output (`--compact --json`) adds, only when they apply: `parent_msg` and `posted_ids` (the first 8 hex), `parent_basis: "annotation"`, `edge: "ambiguous"` with `candidates`, `msgs` and `steered` (with `not_delivered` and `steered_capped` beside them), and a thread-level `steering: "not_recorded"`.
 
 ---
 

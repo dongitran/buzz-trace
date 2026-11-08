@@ -5,6 +5,38 @@ All notable changes to `buzz-trace` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.2] - 2026-11-08
+
+A trace written before a runtime recorded `nostr.posted_event_id` holds no id for a posted message, and a span cannot be edited.
+Phoenix can hold a span annotation on it, though. buzz-trace now reads the id from one, so an old thread can be completed from
+inside Phoenix and shown exactly: the thread `fb46eb2a…` shows message `212193a2…` posted by Turn 1.
+
+### Added
+- **The posted id from a span annotation.** After a thread's spans are read, buzz-trace asks Phoenix for the annotations named
+  `nostr.posted_event_id` on the reply calls whose span records no id (`GET /v1/projects/{project}/span_annotations`, `span_ids`
+  repeated, 50 spans a request, `include_annotation_names=nostr.posted_event_id`, the cursor followed). The `result.label`, when it
+  is a 64-hex id, counts exactly as the attribute would. Nothing is asked when there is no such call. buzz-trace only reads: it
+  makes no request but GET, and never writes an annotation.
+- **How to complete a trace** (README, skill): one annotation per reply span, `POST /v1/span_annotations`, `name`
+  `nostr.posted_event_id`, `annotator_kind` `CODE`, an `identifier` (the same one again updates it), `result.label` the 64-hex id,
+  `result.explanation` why it is known, `metadata`.
+- **The report says where the id came from.** `parent_message.basis` is `annotation` (an exact link, `REPLY_TO`); a post read from an
+  annotation has `event_id_source: "annotation"`; compact output has `parent_basis: "annotation"`. The terminal reads
+  `Reply To : message 212193a2… posted by Turn 1 (ba-kent-twin) — id from a span annotation` and `Posted   : 212193a2… (span annotation)`;
+  the Markdown says `(annotation)`. A thread whose runtime recorded the ids reads, and serializes, exactly as before.
+
+### Rules
+- **Which id wins**: the attribute, then the annotation, then `event_id <hex>` in the output text.
+- **Several annotations on a span**: the latest (`updated_at`, else `created_at`) counts. If its label is not a 64-hex id the span
+  has none from annotations: an older one was replaced and is not used. Equally new annotations that name different ids give none.
+- **An annotation is not evidence about steering.** It was written afterwards, so a trace completed this way still reads
+  `steered messages are not recorded in this trace`; only an id the runtime recorded counts as a sign that it writes steer spans.
+- A Phoenix that answers 404 for the annotations (no such route) is read as having none; any other failure is an error.
+
+### Changed
+- A thread whose reply spans lack an id costs one more request per 50 such spans (a thread whose project is found first: five
+  requests, not four). The message of the `AMBIGUOUS_PARENT` anomaly says an id can also be written as an annotation.
+
 ## [0.4.1] - 2026-11-08
 
 The Buzz fork now writes `steer` spans and posted ids on the four ba twins, and its authors read 0.4.0 against live threads. Four

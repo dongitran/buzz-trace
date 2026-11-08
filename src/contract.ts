@@ -11,6 +11,13 @@
  *    `event_id <64 hex>` in the span's `output.value` or `tool.output`; the reply tool returns
  *    `posted (N characters) · event_id <hex>`.
  *
+ * 1b. Annotations, to complete a trace afterwards. A trace written before a runtime recorded the id holds none, and a span
+ *    cannot be edited. Phoenix can hold a span annotation, though, and buzz-trace reads one named `nostr.posted_event_id` on a
+ *    posting tool span, whose `result.label` is the id (64 hex) of the message the call posted. Whoever knows the ids (say, an
+ *    operator who read them from the relay) writes them with `POST /v1/span_annotations`; buzz-trace never writes one.
+ *    Where several say, the attribute wins, then the annotation, then `event_id <hex>` in the output text; of several
+ *    annotations on one span the latest (`updated_at`) counts, and if its label is no id the span has none from annotations.
+ *
  * 2. Steered messages. With `turn_handling: steer`, a message that arrives while a turn runs is injected into that turn and
  *    starts no trace. The runtime records each one as a child span named `steer` under the turn's `agent_turn` span (same
  *    trace), starting when the message was delivered, or as a span event of the same name carrying the same attributes:
@@ -29,6 +36,8 @@
  * "tool.parameters.text": "…", "nostr.posted_event_id": "<id of the message it posted>" } }.
  */
 
+import type { SpanAnnotation } from "./models.js";
+
 /** Attribute on a posting tool span: the id (64 hex) of the message the call created. */
 export const POSTED_EVENT_ID_ATTR = "nostr.posted_event_id";
 /** Earlier spelling still read: a list (or comma-separated text) of ids, on a tool span or on the turn's root span. */
@@ -45,6 +54,44 @@ export function postedIdFromOutput(output: unknown): string | null {
   }
   const match = POSTED_OUTPUT_PATTERN.exec(output);
   return match ? match[1].toLowerCase() : null;
+}
+
+/** Name of the span annotation that gives the id of the message a posting call created: the attribute's own name. */
+export const POSTED_EVENT_ID_ANNOTATION = POSTED_EVENT_ID_ATTR;
+
+const HEX64_LABEL = /^[0-9a-f]{64}$/i;
+
+/**
+ * The id of the message a posting call created, from the annotations on its span: the label (64 hex, lower-cased) of the latest
+ * annotation named `nostr.posted_event_id`. Null when there is none, when the latest one's label is no id (an older one is not
+ * used in its place: it was replaced), or when the newest annotations are equally new and name different ids (buzz-trace does not
+ * choose). An annotation with no time counts as the oldest.
+ */
+export function postedIdFromAnnotations(annotations: readonly SpanAnnotation[] | undefined): string | null {
+  if (!annotations || annotations.length === 0) {
+    return null;
+  }
+  let newest = Number.NEGATIVE_INFINITY;
+  let latest: SpanAnnotation[] = [];
+  for (const annotation of annotations) {
+    if (annotation.name !== POSTED_EVENT_ID_ANNOTATION) {
+      continue;
+    }
+    const at = annotation.at ?? Number.NEGATIVE_INFINITY;
+    if (at > newest) {
+      newest = at;
+      latest = [annotation];
+    } else if (at === newest) {
+      latest.push(annotation);
+    }
+  }
+  const labels = new Set(
+    latest.map((annotation) => {
+      const label = typeof annotation.label === "string" ? annotation.label.trim() : "";
+      return HEX64_LABEL.test(label) ? label.toLowerCase() : null;
+    }),
+  );
+  return labels.size === 1 ? [...labels][0] : null;
 }
 
 /** Name of the child span, and of the span event, that records a steered message. */

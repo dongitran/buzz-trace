@@ -62,6 +62,18 @@ export interface SpanEventNode {
   attributes: Record<string, unknown>;
 }
 
+/**
+ * An annotation Phoenix holds on a span, as buzz-trace reads it (`GET /v1/projects/{project}/span_annotations`). buzz-trace only
+ * reads annotations; it never writes one.
+ */
+export interface SpanAnnotation {
+  name: string;
+  /** `result.label`: for `nostr.posted_event_id`, the id of the message the call posted. Not checked here; null when absent. */
+  label: string | null;
+  /** When it was last written (epoch milliseconds): `updated_at`, else `created_at`; null when Phoenix gave neither. */
+  at: number | null;
+}
+
 export class SpanNode {
   spanId: string;
   traceId: string;
@@ -75,6 +87,8 @@ export class SpanNode {
   statusMessage?: string | null;
   attributes: Record<string, unknown>;
   events: SpanEventNode[];
+  /** Annotations Phoenix holds on the span, as far as the client asked for them (only the posting calls' `nostr.posted_event_id`). */
+  annotations: SpanAnnotation[] = [];
 
   constructor(data: SpanNodeData) {
     this.spanId = data.context?.span_id || data.span_id || data.id || "";
@@ -159,8 +173,12 @@ export interface Anomaly {
  */
 export type ThreadEdgeType = "REPLY_TO" | "INFERRED" | "AMBIGUOUS" | "THREAD_ROOT" | "TEMPORAL";
 
-/** What the parent message of a turn is known to be (see `AgentTurn.parentMessage`). */
-export type ParentBasis = "posted" | "started" | "steered" | "inferred" | "ambiguous" | "thread_root" | "unknown";
+/**
+ * What the parent message of a turn is known to be (see `AgentTurn.parentMessage`). `posted`: a turn is recorded as having posted
+ * it (by the runtime). `annotation`: the same, but the id of the posted message is only known from a span annotation written
+ * afterwards (see contract.ts, 1b): an exact link all the same.
+ */
+export type ParentBasis = "posted" | "annotation" | "started" | "steered" | "inferred" | "ambiguous" | "thread_root" | "unknown";
 
 export interface ParentMessage {
   /** The message the turn's trigger replies to (`nostr.reply_to_id`). */
@@ -212,6 +230,9 @@ export interface ThreadDAG {
   branches: ThreadBranch[];
 }
 
+/** Where the id of a posted message was read: the span's attribute, a span annotation written afterwards, or `event_id <hex>` in the tool's output text. */
+export type PostedIdSource = "attribute" | "annotation" | "output";
+
 /** One call to a posting tool: when it ran, what it was given to say, which message it answered and, if recorded, which it created. */
 export interface PostRecord {
   spanId: string;
@@ -219,8 +240,10 @@ export interface PostRecord {
   end: number;
   text: string | null;
   replyTo: string | null;
-  /** The id of the message the call created (`nostr.posted_event_id`), null when the span does not record it. */
+  /** The id of the message the call created (`nostr.posted_event_id`, or an annotation of that name), null when nothing records it. */
   eventId: string | null;
+  /** Where `eventId` was read; absent when there is none. */
+  eventIdSource?: PostedIdSource;
 }
 
 export interface AgentTurn {
@@ -236,8 +259,10 @@ export interface AgentTurn {
   senderName?: string | null;
   /** What the turn posted to the thread through a reply/send tool, in order. */
   postedTexts?: string[];
-  /** Event ids of the messages the turn posted, when telemetry records them (`nostr.posted_event_id[s]`). */
+  /** Event ids of the messages the turn posted, when telemetry records them (`nostr.posted_event_id[s]`, or an annotation of that name). */
   postedEventIds?: string[];
+  /** Those of `postedEventIds` that only a span annotation records. They are not evidence that the runtime writes steer spans. */
+  annotatedEventIds?: string[];
   /** Event ids the turn's reply calls answered (`reply_to`), in order. */
   answeredEventIds?: string[];
   /** The turn's posting calls (epoch milliseconds), each with the id of the message it created when that is recorded. */
@@ -376,8 +401,11 @@ export interface ThreadTelemetryJSON {
     steering_recorded?: boolean;
     /** The ids of the messages the turn posted, as far as the spans record them (see `posts`). */
     posted_event_ids?: string[];
-    /** Each posting call: the message it created (null when not recorded), the one it answered, its text and time. */
-    posts?: Array<{ event_id: string | null; reply_to: string | null; text: string | null; at: string }>;
+    /**
+     * Each posting call: the message it created (null when not recorded), the one it answered, its text and time.
+     * `event_id_source` is there only when the id was read from a span annotation written afterwards.
+     */
+    posts?: Array<{ event_id: string | null; event_id_source?: "annotation"; reply_to: string | null; text: string | null; at: string }>;
     /** The ids of the messages the turn's reply calls answered. */
     answered_event_ids?: string[];
     parent_turn_index?: number | null;
@@ -552,6 +580,7 @@ export class ThreadTelemetry {
         posted_event_ids: t.postedEventIds ?? [],
         posts: (t.posts ?? []).map((p) => ({
           event_id: p.eventId,
+          ...(p.eventIdSource === "annotation" ? { event_id_source: "annotation" } : {}),
           reply_to: p.replyTo,
           text: p.text,
           at: new Date(p.start).toISOString(),
