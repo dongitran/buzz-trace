@@ -63,7 +63,7 @@ buzz-trace query <thread_id> --failures --compact --json --project <community>
 {
   "thread_id": "5e06c7a86cfb158a1a89a96ec690ae5411d4633818a952a02a6f46ace0cd49e9",
   "status": "OK",
-  "session_url": "http://localhost:6006/projects/mobile/sessions?selectedSessionId=5e06c7a86cfb158a1a89a96ec690ae5411d4633818a952a02a6f46ace0cd49e9",
+  "session_url": "http://localhost:6006/redirects/sessions/5e06c7a86cfb158a1a89a96ec690ae5411d4633818a952a02a6f46ace0cd49e9",
   "total_turns": 2,
   "filtered_turns": 0,
   "turns": []
@@ -86,7 +86,7 @@ buzz-trace query <thread_id> --last 1 --compact --json --project <community>
 {
   "thread_id": "5e06c7a86cfb158a1a89a96ec690ae5411d4633818a952a02a6f46ace0cd49e9",
   "status": "OK",
-  "session_url": "http://localhost:6006/projects/mobile/sessions?selectedSessionId=5e06c7...",
+  "session_url": "http://localhost:6006/redirects/sessions/5e06c7...",
   "total_turns": 2,
   "filtered_turns": 1,
   "turns": [
@@ -99,7 +99,7 @@ buzz-trace query <thread_id> --last 1 --compact --json --project <community>
       "tokens": 79332,
       "calls": 3,
       "ctx": 26444,
-      "trace_url": "http://localhost:6006/projects/mobile/traces/237cdb2708d2f160c5174fdd8ed47086",
+      "trace_url": "http://localhost:6006/redirects/traces/237cdb2708d2f160c5174fdd8ed47086",
       "response": "Tôi đã thực hiện phép tính bằng Python...",
       "tools": [
         {
@@ -123,13 +123,14 @@ To point users or review artifacts to the exact Arize Phoenix dashboard:
 - **Full Thread Session (All Turns & Gantt Waterfall):**
   Extracted directly from `session_url` in the query response:
   ```
-  http://localhost:6006/projects/<project>/sessions?selectedSessionId=<thread_id>
+  http://localhost:6006/redirects/sessions/<thread_id>
   ```
 - **Single Turn Trace (Individual Span Tree):**
   Extracted directly from `trace_url` of turn `<N>`:
   ```
-  http://localhost:6006/projects/<project>/traces/<trace_id>
+  http://localhost:6006/redirects/traces/<trace_id>
   ```
+- Phoenix routes a project by its global id (`UHJvamVjdDoz` is `Project:3`), not by name, so these two redirect routes are the links that need no id. With authentication on, the page asks for a login first.
 
 ---
 
