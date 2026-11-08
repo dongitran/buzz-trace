@@ -15,6 +15,8 @@ export interface ConfigOptions {
   showSecrets?: boolean;
   /** A Phoenix API key, for a server that has authentication on. Falls back to PHOENIX_API_KEY. */
   apiKey?: string;
+  /** A file (or `-` for stdin) holding the relay's thread as `buzz messages thread --format json` prints it. */
+  messagesPath?: string;
 }
 
 export class Config {
@@ -24,6 +26,7 @@ export class Config {
   dbPath: string | null;
   timeout: number;
   showSecrets: boolean;
+  messagesPath: string | null;
   /** Never enumerable, so serializing or logging a Config cannot print it. */
   declare readonly apiKey: string | null;
 
@@ -55,6 +58,7 @@ export class Config {
     this.project = options.project || process.env.PHOENIX_PROJECT || "mobile";
     this.timeout = options.timeout ?? 10000;
     this.showSecrets = options.showSecrets ?? false;
+    this.messagesPath = options.messagesPath ?? null;
     Object.defineProperty(this, "apiKey", {
       value: options.apiKey || process.env.PHOENIX_API_KEY || null,
       enumerable: false,

@@ -5,6 +5,27 @@ All notable changes to `buzz-trace` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-11-08
+
+Run on the four real ba threads (15 messages): parent links right for 14 of 15 from Phoenix alone, 15 of 15 with the
+relay's thread.
+
+### Added
+- **`--messages <file>`** (`-` reads stdin): the relay's thread as `buzz messages thread --format json` prints it. Each reply
+  call of a turn is matched to the relay message it created (same message answered, same moment, same words; one message
+  per call), so the event id of everything a turn posted is known and every link is exact. No `AMBIGUOUS_PARENT` is left
+  and no inference is needed. Optional: without it nothing changes.
+- **`CONTEXT_GROWTH` says what the growth is made of**: per round, what the spans show (the turn's output, its tool
+  results, the next message) and what they do not (`explainedPerRound`, `unexplainedPerRound`). When most of it is not
+  in any span the message says it is re-sent with every prompt. On the ba twins it reported ~14.5k a round, and the
+  agent's own session shows two static prompt blocks of about 15k tokens sent with every message.
+
+### Fixed
+- **Absolute times of spans read from Phoenix's SQLite were shifted by the machine's UTC offset.** Phoenix stores naive UTC
+  (`2026-11-08 01:13:33.096000`); JavaScript read it as local time. Durations looked right (two shifted times subtract
+  fine), so it went unseen on UTC machines; on a UTC+7 machine every `start_time`/`end_time` was 7 hours early and no
+  comparison with another clock (the relay's) could work. A time without a zone is now UTC; one that names its zone is kept.
+
 ## [0.2.1] - 2026-11-08
 
 ### Fixed

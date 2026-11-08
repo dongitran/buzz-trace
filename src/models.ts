@@ -35,6 +35,17 @@ export function flattenAttributes(obj: Record<string, unknown>, prefix = ""): Re
   return res;
 }
 
+/**
+ * A span time as a Date. Phoenix's SQLite stores naive UTC (`2026-11-08 01:13:33.096000`): JavaScript would read that as
+ * the machine's local time, so a time without a zone is taken as UTC. A time that names its zone (`Z`, `+07:00`) is kept.
+ */
+export function parseSpanTime(value: string): Date {
+  const text = value.trim();
+  const hasZone = /(?:Z|[+-]\d{2}(?::?\d{2})?)$/i.test(text.replace(/^\d{4}-\d{2}-\d{2}/, ""));
+  const parsed = new Date(hasZone ? text.replace(" ", "T") : `${text.replace(" ", "T")}Z`);
+  return Number.isNaN(parsed.getTime()) ? new Date(text) : parsed;
+}
+
 export class SpanNode {
   spanId: string;
   traceId: string;
@@ -60,10 +71,10 @@ export class SpanNode {
     this.attributes = { ...flattenAttributes(rawAttrs), ...rawAttrs };
 
     if (data.start_time) {
-      this.startTime = new Date(data.start_time);
+      this.startTime = parseSpanTime(data.start_time);
     }
     if (data.end_time) {
-      this.endTime = new Date(data.end_time);
+      this.endTime = parseSpanTime(data.end_time);
     }
 
     if (this.startTime && this.endTime) {
@@ -138,6 +149,14 @@ export interface ThreadDAG {
   branches: ThreadBranch[];
 }
 
+/** One call to a posting tool: when it ran, what it was given to say and which message it answered. */
+export interface PostRecord {
+  start: number;
+  end: number;
+  text: string | null;
+  replyTo: string | null;
+}
+
 export interface AgentTurn {
   turnIndex: number;
   traceId: string;
@@ -155,6 +174,8 @@ export interface AgentTurn {
   postedEventIds?: string[];
   /** Event ids the turn's reply calls answered (`reply_to`), in order. */
   answeredEventIds?: string[];
+  /** The turn's posting calls (epoch milliseconds), used to match them with the relay's messages. */
+  posts?: PostRecord[];
   /**
    * Messages the turn answered that did not start it: with steering, a message that arrives while a turn runs is injected
    * into it and never starts a trace. Excludes the thread's root, the trigger's parent and other turns' triggers.
@@ -182,6 +203,8 @@ export interface AgentTurn {
   modelCalls?: number;
   /** Prompt tokens of one model call, estimated: the turn's prompt tokens over `modelCalls`. */
   contextPerCall?: number;
+  /** Tokens of the text that started the turn (its root span's input): what the next round adds to the history. */
+  inputTextTokens?: number;
   /** Prompt tokens served from / written to the model's prompt cache (`llm.token_count.prompt_details.*`). */
   cacheReadTokens?: number;
   cacheWriteTokens?: number;
@@ -313,6 +336,8 @@ export class ThreadTelemetry {
   anomalies: Anomaly[];
   /** Where the telemetry was read from (`sqlite:<path>` or the Phoenix endpoint); null when nothing was found. */
   source: string | null;
+  /** When the relay's thread was joined in (`--messages`): how many messages were read and how many replies matched. */
+  relayMessages: { read: number; linked: number } | null;
   /** Every place that was looked in for the thread, and what each said (kept for a NOT_FOUND). */
   sourcesTried: string[];
 
@@ -337,6 +362,7 @@ export class ThreadTelemetry {
     this.turns = init.turns || [];
     this.anomalies = init.anomalies || [];
     this.source = init.source ?? null;
+    this.relayMessages = init.relayMessages ?? null;
     this.sourcesTried = init.sourcesTried ?? [];
   }
 

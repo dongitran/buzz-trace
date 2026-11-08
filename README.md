@@ -73,6 +73,17 @@ When running locally on the Docker host:
 buzz-trace inspect a519f713... --db /root/.phoenix/phoenix.db
 ```
 
+### Exact parent links with the relay's thread
+
+Phoenix spans do not record the event id of what a turn posted, so when a person answers an agent's own message the parent
+turn is inferred. Give buzz-trace the relay's thread and it matches each reply call with the message it created:
+```bash
+buzz messages thread --channel <channel_id> --event <thread_root_id> --format json > thread.json
+buzz-trace query <thread_root_id> --messages thread.json --compact --json --flat
+```
+(`--messages -` reads stdin.) Four real threads, 15 messages: 14 links right from Phoenix alone (one flagged
+`AMBIGUOUS_PARENT`), 15 with `--messages`.
+
 A Phoenix with authentication on (`PHOENIX_ENABLE_AUTH=true`) answers the REST API only with an API key:
 ```bash
 PHOENIX_API_KEY=... buzz-trace query a519f713... --endpoint https://phoenix.example.com --project ba
@@ -164,6 +175,7 @@ buzz-trace sessions --project mobile --limit 10
 | `PHOENIX_PROJECT` | `--project` | `mobile` | Arize Phoenix project name |
 | `PHOENIX_DB_PATH` | `--db` | Auto-detected | Path to local `phoenix.db` |
 | `PHOENIX_API_KEY` | `--api-key` | none | Phoenix API key (Bearer), for a server with authentication on |
+| – | `--messages` | none | The relay's thread as JSON (a file, or `-` for stdin): exact parent links |
 | `NO_COLOR` | `--no-color` | `0` | Disables ANSI terminal coloring |
 
 ---

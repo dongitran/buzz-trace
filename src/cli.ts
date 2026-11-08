@@ -12,13 +12,14 @@ import { parseArgs } from "node:util";
 import { PhoenixClient, PhoenixDBClient, type PhoenixSession } from "./clients/index.js";
 import { Config, ConfigOptions } from "./config.js";
 import { ThreadAggregator, AnomalyDetector, ThreadQueryEngine, TraceDiffer, ContextSummarizer } from "./engine/index.js";
+import { parseThreadMessages, type ThreadMessage } from "./engine/messages.js";
 import { createRequire } from "node:module";
 import { JsonRenderer, MarkdownRenderer, TerminalRenderer } from "./formatters/index.js";
 import { SpanNode, ThreadTelemetry } from "./models.js";
 
 const require = createRequire(import.meta.url);
 const pkg = require("../package.json") as { version: string };
-const VERSION = pkg.version || "0.2.1";
+const VERSION = pkg.version || "0.3.0";
 
 const HELP_TEXT = `
 buzz-trace ${VERSION}
@@ -43,6 +44,7 @@ OPTIONS:
   --project <name>      Arize Phoenix project name (default: mobile)
   --db <path>           Direct path to Phoenix SQLite database file (mode=ro)
   --api-key <key>       Phoenix API key for a server with authentication on (default: $PHOENIX_API_KEY)
+  --messages <file>     The relay's thread as 'buzz messages thread ... --format json' prints it ('-' reads stdin): makes parent links exact
   --budget <num>        Token budget limit for context command (e.g. 200, 500)
   --turn1 <num>         First turn index for diff comparison
   --turn2 <num>         Second turn index for diff comparison
@@ -67,12 +69,23 @@ OPTIONS:
   --version             Show version
 `;
 
+/** The relay's thread, from a file or from stdin (`-`); a failure names the flag so it is not mistaken for a Phoenix error. */
+function loadMessages(file: string): ThreadMessage[] {
+  try {
+    const text = file === "-" ? fs.readFileSync(0, "utf-8") : fs.readFileSync(file, "utf-8");
+    return parseThreadMessages(JSON.parse(text));
+  } catch (err) {
+    throw new Error(`--messages ${file}: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
 /** `sqlite:<path> (written <UTC minute>)`: the file's age is what tells a stale copy from a live database. */
 function describeDb(db: PhoenixDBClient): string {
   return `sqlite:${db.dbPath} (written ${db.modifiedAt().toISOString().slice(0, 16)}Z)`;
 }
 
 export async function fetchThreadTelemetry(config: Config, threadId: string): Promise<ThreadTelemetry> {
+  const messages = config.messagesPath ? loadMessages(config.messagesPath) : undefined;
   let spans: SpanNode[] = [];
   let source: string | null = null;
   const tried: string[] = [];
@@ -114,8 +127,11 @@ export async function fetchThreadTelemetry(config: Config, threadId: string): Pr
   }
 
   const aggregator = new ThreadAggregator(threadId, config.project, null, config.uiEndpoint);
-  const telemetry = aggregator.aggregate(spans);
-  telemetry.source = source;
+  const telemetry = aggregator.aggregate(spans, { messages });
+  telemetry.source =
+    source && telemetry.relayMessages
+      ? `${source} + relay messages (${telemetry.relayMessages.read} read, ${telemetry.relayMessages.linked} linked)`
+      : source;
   telemetry.sourcesTried = tried;
 
   // Set Phoenix Web UI deep links
@@ -569,6 +585,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     project: { type: "string" as const },
     db: { type: "string" as const },
     "api-key": { type: "string" as const },
+    messages: { type: "string" as const },
     json: { type: "boolean" as const, default: false },
     compact: { type: "boolean" as const, default: false },
     flat: { type: "boolean" as const, default: false },
@@ -630,6 +647,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     project: values.project,
     dbPath: values.db,
     apiKey: values["api-key"],
+    messagesPath: values.messages,
   };
   const config = Config.load(configOptions);
 
