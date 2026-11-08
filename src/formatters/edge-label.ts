@@ -100,12 +100,20 @@ export function postedIds(turn: AgentTurn): string[] {
   return (turn.postedEventIds ?? []).map(shortId);
 }
 
+/** The steered messages a turn took in, not those it was sent too late (`steer.delivered` false). */
+export function deliveredSteers(turn: AgentTurn): SteeredMessage[] {
+  return (turn.steered ?? []).filter((m) => m.delivered !== false);
+}
+
 /** `1 message`, `4 messages (3 steered)`. */
 export function handledLabel(turn: AgentTurn): string {
-  const steered = turn.steered?.length ?? 0;
+  const steered = deliveredSteers(turn).length;
   const handled = turn.handledMessages ?? 1 + steered;
   return steered > 0 ? `${handled} messages (${steered} steered)` : `${handled} message${handled === 1 ? "" : "s"}`;
 }
+
+/** What a report says of a turn whose steer spans were cut off (the runtime caps them). */
+export const STEER_CAPPED_NOTE = "more messages were steered into this turn than the runtime records: this list is not complete";
 
 /** One steered message for a report: its id, priority, text, and, where only a reply call showed it, how it is known. */
 export function describeSteered(message: SteeredMessage, maxText = 100): string {
@@ -114,6 +122,12 @@ export function describeSteered(message: SteeredMessage, maxText = 100): string 
   const flat = message.text ? message.text.replace(/\s+/g, " ").trim() : "";
   const text = flat ? ` "${flat.length > maxText ? `${flat.slice(0, maxText)}...` : flat}"` : "";
   const how =
-    message.source === "reply_call" ? " (inferred from a reply call; text not recorded)" : !flat ? " (text not recorded)" : "";
+    message.delivered === false
+      ? " — the turn ended before it reached it"
+      : message.source === "reply_call"
+        ? " (inferred from a reply call; text not recorded)"
+        : !flat
+          ? " (text not recorded)"
+          : "";
   return `${id}${priority}${text}${how}`;
 }

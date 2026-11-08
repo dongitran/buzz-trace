@@ -43,6 +43,34 @@ export interface SteerSpec {
   priority?: string;
   /** Recorded as a child span (the contract) or as a span event on the turn's root span. */
   as?: "span" | "event";
+  /** What the Buzz fork also writes: `steer.delivered` (a boolean, or the words), `steer.end_reason`, `nostr.sender_pubkey`. */
+  delivered?: boolean | string;
+  endReason?: string;
+  senderPubkey?: string;
+  /** Leave `nostr.event_id` out, as a record that names no message would. */
+  noEventId?: boolean;
+}
+
+/**
+ * The block a steered message arrives in, as the Buzz fork records it in `input.value`: a framing line, the envelope, and a
+ * closing note. `from` is what the envelope's From line says (the fork's blocks have an npub and no name).
+ */
+export function steerBlock(o: { eventId: string; content: string; root: string; from?: string; pubkey?: string }): string {
+  return [
+    "[New message — arrived while you were working]",
+    "",
+    "[Buzz event: @mention]",
+    `Event ID: ${o.eventId}`,
+    `Channel: ${CHANNEL}`,
+    "Kind: 9",
+    `From: ${o.from ?? "npub1lt6z6e95lgsr8dfc27hjemj2z4hrh22d96j0lvu7hj2j2pdexlksyt0uu7"} (hex: ${o.pubkey ?? HUMAN})`,
+    "Time: 2026-11-08T06:41:18+00:00",
+    `Content: ${o.content}`,
+    `Tags: ${JSON.stringify([["h", CHANNEL], ["e", o.root, "", "reply"], ["p", hex("paul-pubkey")]])}`,
+    `Parsed: parent=${o.root}, root=${o.root}, mentions=[${hex("paul-pubkey")}]`,
+    "",
+    "Note: A new message arrived while you were working. Continue your in-progress work and incorporate the new message if it's relevant; if it's unrelated, you may briefly acknowledge it and carry on.",
+  ].join("\n");
 }
 
 export interface ToolSpec {
@@ -70,6 +98,20 @@ export interface TurnSpec {
   tools?: ToolSpec[];
   /** Extra attributes on the root span (for example a recorded `nostr.posted_event_id`). */
   rootAttributes?: Record<string, unknown>;
+  /** The runtime stopped writing steer spans for this turn: a `steer_spans_capped` event on its root span. */
+  steerCapped?: boolean;
+}
+
+function steerAttributes(s: SteerSpec): Record<string, unknown> {
+  return {
+    ...(s.noEventId ? {} : { "nostr.event_id": s.eventId }),
+    "input.value": s.text,
+    ...(s.sender ? { "nostr.sender_name": s.sender } : {}),
+    ...(s.senderPubkey ? { "nostr.sender_pubkey": s.senderPubkey } : {}),
+    ...(s.priority ? { "steer.priority": s.priority } : {}),
+    ...(s.delivered !== undefined ? { "steer.delivered": s.delivered } : {}),
+    ...(s.endReason ? { "steer.end_reason": s.endReason } : {}),
+  };
 }
 
 function envelope(spec: TurnSpec): string {
@@ -95,12 +137,7 @@ export function turnSpans(spec: TurnSpec): SpanNode[] {
     .map((s) => ({
       name: "steer",
       timestamp: at(s.at),
-      attributes: {
-        "nostr.event_id": s.eventId,
-        "input.value": s.text,
-        ...(s.sender ? { "nostr.sender_name": s.sender } : {}),
-        ...(s.priority ? { "steer.priority": s.priority } : {}),
-      },
+      attributes: steerAttributes(s),
     }));
   const spans: SpanNode[] = [
     new SpanNode({
@@ -129,7 +166,7 @@ export function turnSpans(spec: TurnSpec): SpanNode[] {
         "llm.cost.total": 0.015,
         ...(spec.rootAttributes ?? {}),
       },
-      events: steerEvents,
+      events: [...steerEvents, ...(spec.steerCapped ? [{ name: "steer_spans_capped", timestamp: at(spec.end), attributes: {} }] : [])],
     }),
     new SpanNode({
       ...base,
@@ -205,20 +242,14 @@ export function turnSpans(spec: TurnSpec): SpanNode[] {
       spans.push(
         new SpanNode({
           ...base,
+          status_code: s.delivered === false || s.delivered === "false" ? "UNSET" : "OK",
           span_id: `${spec.trace}-steer${i}`,
           parent_id: rootId,
           name: "steer",
           span_kind: "CHAIN",
           start_time: at(s.at),
           end_time: at(s.at),
-          attributes: {
-            "session.id": spec.root,
-            "openinference.span.kind": "CHAIN",
-            "nostr.event_id": s.eventId,
-            "input.value": s.text,
-            ...(s.sender ? { "nostr.sender_name": s.sender } : {}),
-            ...(s.priority ? { "steer.priority": s.priority } : {}),
-          },
+          attributes: { "session.id": spec.root, "openinference.span.kind": "CHAIN", ...steerAttributes(s) },
         }),
       );
     });

@@ -103,6 +103,7 @@ export class ThreadQueryEngine {
       totalCostUsd: filteredCost,
       source: telemetry.source,
       sourcesTried: telemetry.sourcesTried,
+      steeringRecorded: telemetry.steeringRecorded,
       startTime: filteredTurns.length > 0 ? filteredTurns[0].startTime : telemetry.startTime,
       endTime: filteredTurns.length > 0 ? filteredTurns[filteredTurns.length - 1].endTime : telemetry.endTime,
       status: filteredTurns.some((t) => t.statusCode !== "OK") ? "ERROR" : telemetry.status,

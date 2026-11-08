@@ -22,6 +22,9 @@
  *      nostr.sender_name        who wrote it
  *      steer.priority           `now` or `later`
  *
+ * A runtime that writes the first (posted ids) is taken to write the second as well: the report prints "steered messages are not
+ * recorded in this trace" only for a turn with no sign of either.
+ *
  * Example of a reply span: { name: "tool:mcp__buzz-thread__reply", attributes: { "tool.parameters.reply_to": "<id>",
  * "tool.parameters.text": "…", "nostr.posted_event_id": "<id of the message it posted>" } }.
  */
@@ -53,3 +56,24 @@ export const STEER_EVENT_ID_ATTR = "nostr.event_id";
 export const STEER_TEXT_ATTR = "input.value";
 export const STEER_SENDER_ATTR = "nostr.sender_name";
 export const STEER_PRIORITY_ATTR = "steer.priority";
+
+/**
+ * What the Buzz fork also writes on a steer span, beyond the contract. All optional: a runtime that writes none of it is read
+ * as before.
+ *
+ * - `input.value` is the whole block the agent was handed: a framing line, the Buzz envelope (`Event ID:`, `From:`, `Content:`,
+ *   `Tags:`, `Parsed:`), and a closing note. buzz-trace takes the `Content:` line as the message's text.
+ * - `nostr.sender_pubkey` names the sender; `nostr.sender_name` is there only when the block has a real name.
+ * - `steer.delivered` is false when the turn ended before the message was echoed to it or a result named it. The message is not
+ *   known to have been handled by that turn (it may run in a later one, or never), so it is listed as not delivered, not counted
+ *   and not linked to.
+ * - `steer.end_reason` says how the span ended: `echo`, `result` or `turn_end`. `steer.uuid` identifies the injected message.
+ */
+export const STEER_SENDER_PUBKEY_ATTR = "nostr.sender_pubkey";
+export const STEER_DELIVERED_ATTR = "steer.delivered";
+export const STEER_END_REASON_ATTR = "steer.end_reason";
+export const STEER_UUID_ATTR = "steer.uuid";
+/** The first line of the text a steered message arrives in. */
+export const STEER_BLOCK_HEADER = "[New message — arrived while you were working]";
+/** A span event on the `agent_turn`: the runtime stops writing steer spans after a number of them, so the list is not complete. */
+export const STEER_CAPPED_EVENT_NAME = "steer_spans_capped";

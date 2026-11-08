@@ -22,10 +22,15 @@ import {
   POSTED_EVENT_IDS_ATTR,
   POSTED_OUTPUT_ATTRS,
   postedIdFromOutput,
+  STEER_BLOCK_HEADER,
+  STEER_CAPPED_EVENT_NAME,
+  STEER_DELIVERED_ATTR,
+  STEER_END_REASON_ATTR,
   STEER_EVENT_ID_ATTR,
   STEER_EVENT_NAME,
   STEER_PRIORITY_ATTR,
   STEER_SENDER_ATTR,
+  STEER_SENDER_PUBKEY_ATTR,
   STEER_SPAN_NAME,
   STEER_TEXT_ATTR,
 } from "../contract.js";
@@ -350,14 +355,37 @@ function postOf(toolName: string, attrs: Record<string, unknown>): PostCall | nu
   return null;
 }
 
-/** One steered message out of the attributes of a `steer` span or event. An id that is not 64 hex is no id. */
+/** `true`/`false` from a boolean or from the words; null for anything else. */
+function booleanOf(value: unknown): boolean | null {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "string" && /^(true|false)$/i.test(value.trim())) {
+    return value.trim().toLowerCase() === "true";
+  }
+  return null;
+}
+
+/**
+ * One steered message out of the attributes of a `steer` span or event. An id that is not 64 hex is no id. The text of the
+ * span is the block the agent was handed (a framing line, the Buzz envelope, a closing note): the message is its `Content:`
+ * line. A runtime that records only the message's own text is read as before, minus the framing line if it is there.
+ */
 function readSteer(attrs: Record<string, unknown>, at: number | null, source: "span" | "event"): SteeredMessage {
   const text = (value: unknown) => (typeof value === "string" && value.trim() ? value.trim() : null);
+  const raw = typeof attrs[STEER_TEXT_ATTR] === "string" ? (attrs[STEER_TEXT_ATTR] as string) : "";
+  const block = parseBuzzEnvelope(raw);
+  const own = raw.trim().startsWith(STEER_BLOCK_HEADER) ? raw.trim().slice(STEER_BLOCK_HEADER.length) : raw;
+  // An npub is not a name: the sender is shown by name only when there is one.
+  const blockName = block?.senderName && !/^npub1/i.test(block.senderName) ? block.senderName : null;
   return {
-    eventId: hexIds(attrs[STEER_EVENT_ID_ATTR])[0] ?? null,
-    text: text(attrs[STEER_TEXT_ATTR]),
-    sender: text(attrs[STEER_SENDER_ATTR]),
+    eventId: hexIds(attrs[STEER_EVENT_ID_ATTR])[0] ?? block?.eventId ?? null,
+    text: block ? text(block.content) : text(own),
+    sender: text(attrs[STEER_SENDER_ATTR]) ?? blockName,
+    senderPubkey: hexIds(attrs[STEER_SENDER_PUBKEY_ATTR])[0] ?? block?.senderPubkey ?? null,
     priority: text(attrs[STEER_PRIORITY_ATTR]),
+    delivered: booleanOf(attrs[STEER_DELIVERED_ATTR]),
+    endReason: text(attrs[STEER_END_REASON_ATTR]),
     at,
     source,
   };
@@ -412,9 +440,17 @@ export class ThreadAggregator {
     // 2a. The messages each turn handled besides the one that started it (steered into the running turn). Recorded ones
     // come from `steer` spans and events; where nothing recorded them, a reply call that answered another message shows
     // it. The thread's root, the trigger's parent and the triggers of other turns are answers to messages the thread
-    // already had a turn for, not steering.
+    // already had a turn for, not steering. A recorded message the turn ended before receiving (`steer.delivered` false) is
+    // listed, but it is not known to have been handled: it is not counted and nothing links to it.
     const triggers = new Set(rawTurns.map((t) => t.nostrEventId).filter((id): id is string => Boolean(id)));
+    // Whether a turn's runtime is seen to write the contract (steer records, posted ids), so that a steered message would show.
+    const writesContract = (turn: AgentTurn) =>
+      Boolean(turn.steerCapped) ||
+      (turn.postedEventIds ?? []).length > 0 ||
+      turn.spans.some((span) => span.name === STEER_SPAN_NAME || span.events.some((event) => event.name === STEER_EVENT_NAME));
+    const agentsWritingContract = new Set(rawTurns.filter(writesContract).map((t) => t.agentName));
     for (const turn of rawTurns) {
+      turn.steeringRecorded = writesContract(turn) || agentsWritingContract.has(turn.agentName);
       const recorded = turn.steered ?? [];
       if (recorded.length === 0 && (turn.answeredEventIds ?? []).length === 0) {
         turn.steered = [];
@@ -428,15 +464,26 @@ export class ThreadAggregator {
       );
       const steered: SteeredMessage[] = [
         ...recorded,
-        ...inferred.map((eventId) => ({ eventId, text: null, sender: null, priority: null, at: null, source: "reply_call" as const })),
+        ...inferred.map((eventId) => ({
+          eventId,
+          text: null,
+          sender: null,
+          senderPubkey: null,
+          priority: null,
+          delivered: null,
+          endReason: null,
+          at: null,
+          source: "reply_call" as const,
+        })),
       ];
       // In the order they arrived; one whose time is not known goes last.
       steered.sort((a, b) => (a.at ?? Number.POSITIVE_INFINITY) - (b.at ?? Number.POSITIVE_INFINITY));
+      const handled = steered.filter((m) => m.delivered !== false);
       turn.steered = steered;
-      turn.steeredEventIds = steered.map((m) => m.eventId).filter((id): id is string => Boolean(id));
-      turn.handledMessages = 1 + steered.length;
+      turn.steeredEventIds = handled.map((m) => m.eventId).filter((id): id is string => Boolean(id));
+      turn.handledMessages = 1 + handled.length;
     }
-    const steeringRecorded = spans.some((span) => span.name === STEER_SPAN_NAME || span.events.some((event) => event.name === STEER_EVENT_NAME));
+    const steeringRecorded = rawTurns.some((t) => t.steeringRecorded);
 
     // 2b. Detect INVALID_DURATION (monotonic clock jumps where start_time > end_time)
     const invalidDurationAnomalies: Anomaly[] = [];
@@ -617,6 +664,7 @@ export class ThreadAggregator {
     const answeredEventIds: string[] = [];
     const posts: PostRecord[] = [];
     const recordedSteers: SteeredMessage[] = [];
+    let steerCapped = false;
     const toolWindows: Array<[number, number]> = [];
 
     for (const span of spans) {
@@ -627,6 +675,8 @@ export class ThreadAggregator {
       for (const event of span.events) {
         if (event.name === STEER_EVENT_NAME) {
           recordedSteers.push(readSteer(event.attributes, event.time ? event.time.getTime() : null, "event"));
+        } else if (event.name === STEER_CAPPED_EVENT_NAME) {
+          steerCapped = true;
         }
       }
       if (span.name === STEER_SPAN_NAME) {
@@ -772,6 +822,7 @@ export class ThreadAggregator {
       answeredEventIds,
       posts,
       steered,
+      steerCapped,
       startTime: turnStart,
       endTime: turnEnd,
       durationMs: turnDuration,
@@ -829,12 +880,14 @@ export class ThreadAggregator {
       }
     }
 
-    // The messages turns reply to that no span names: who could have posted each.
+    // The messages turns reply to that no span names: who could have posted each. A message a `steer` record shows was sent
+    // to a turn, not created by one of the turns' reply calls, so it is never looked for among them.
+    const steeredAnywhere = new Set(rawTurns.flatMap((t) => (t.steered ?? []).map((m) => m.eventId)).filter((id): id is string => Boolean(id)));
     const unresolved = new Map<string, AgentTurn[]>();
     for (const turn of rawTurns) {
       const replyTo = turn.nostrReplyTo;
       const root = turn.nostrRootId;
-      if (!replyTo || !root || root === turn.nostrEventId || replyTo === root) {
+      if (!replyTo || !root || root === turn.nostrEventId || replyTo === root || steeredAnywhere.has(replyTo)) {
         continue;
       }
       const poster = byPosted.get(replyTo);

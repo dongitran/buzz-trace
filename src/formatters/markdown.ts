@@ -4,7 +4,7 @@
  */
 
 import { ThreadTelemetry } from "../models.js";
-import { describePoster, edgeLabel, formatCost, handledLabel, ID_NOT_RECORDED, shortId, STEERING_NOT_RECORDED } from "./edge-label.js";
+import { describePoster, edgeLabel, formatCost, handledLabel, ID_NOT_RECORDED, shortId, STEER_CAPPED_NOTE, STEERING_NOT_RECORDED } from "./edge-label.js";
 
 const POSTED_CHARS = 300;
 
@@ -130,15 +130,25 @@ export class MarkdownRenderer {
       for (const turn of t.turns) {
         for (const message of turn.steered ?? []) {
           const id = message.eventId ? `\`${shortId(message.eventId)}\`` : "a message with no id recorded";
-          const how = message.source === "reply_call" ? " (inferred from a reply call; text not recorded)" : "";
-          lines.push(
-            `- Turn ${turn.turnIndex} · ${turn.agentName} also handled ${id}${message.priority ? ` (${message.priority})` : ""}${message.text ? `: ${oneLine(message.text)}` : ""}${how}`,
-          );
+          const priority = message.priority ? ` (${message.priority})` : "";
+          const said = message.text ? `: ${oneLine(message.text)}` : "";
+          if (message.delivered === false) {
+            lines.push(`- ${id}${priority} was sent to Turn ${turn.turnIndex} · ${turn.agentName}, but the turn ended before it reached it${said}`);
+          } else {
+            const how = message.source === "reply_call" ? " (inferred from a reply call; text not recorded)" : "";
+            lines.push(`- Turn ${turn.turnIndex} · ${turn.agentName} also handled ${id}${priority}${said}${how}`);
+          }
+        }
+        if (turn.steerCapped) {
+          lines.push(`- Turn ${turn.turnIndex} · ${turn.agentName}: ${STEER_CAPPED_NOTE}`);
         }
       }
-      if (!t.steeringRecorded) {
+      const unrecorded = [...new Set(t.turns.filter((turn) => !turn.steeringRecorded).map((turn) => turn.agentName))];
+      if (unrecorded.length > 0) {
         lines.push("");
-        lines.push(`> ${STEERING_NOT_RECORDED.charAt(0).toUpperCase()}${STEERING_NOT_RECORDED.slice(1)}: a message that arrived while a turn was running leaves no span here.`);
+        lines.push(
+          `> ${STEERING_NOT_RECORDED.charAt(0).toUpperCase()}${STEERING_NOT_RECORDED.slice(1)}${unrecorded.length === new Set(t.turns.map((turn) => turn.agentName)).size ? "" : ` for ${unrecorded.join(", ")}`}: a message that arrived while a turn was running leaves no span here.`,
+        );
       }
       lines.push("");
     }

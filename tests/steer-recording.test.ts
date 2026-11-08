@@ -152,7 +152,9 @@ describe("steering inferred from reply calls, when nothing recorded it", () => {
       ],
     });
     const turn = first(aggregate(spans));
-    expect(turn.steered).toEqual([{ eventId: hex("s1"), text: null, sender: null, priority: null, at: null, source: "reply_call" }]);
+    expect(turn.steered).toEqual([
+      { eventId: hex("s1"), text: null, sender: null, senderPubkey: null, priority: null, delivered: null, endReason: null, at: null, source: "reply_call" },
+    ]);
     expect(turn.handledMessages).toBe(2);
   });
 

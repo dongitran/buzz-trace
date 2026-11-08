@@ -183,7 +183,10 @@ describe("full JSON", () => {
     expect(third.parent_edge).toBe("REPLY_TO");
     expect(third.parent_message).toEqual({ id: THREAD_C.kentMessage, basis: "posted", posted_by_turn: 1, turns: [1] });
     expect(kent.posted).toHaveLength(1);
-    expect(json.steering).toBe("not_recorded");
+    // A runtime that writes posted ids writes steer spans: a steered message would show here.
+    expect(json.steering).toBe("recorded");
+    expect(kent.steering_recorded).toBe(true);
+    expect(aggregate(threadC()).toJSON().steering).toBe("not_recorded");
   });
 
   it("says, for an unrecorded parent, that no parent was picked and who could have posted it", () => {

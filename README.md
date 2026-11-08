@@ -220,6 +220,8 @@ What an agent runtime writes to Phoenix so that buzz-trace is exact. Every name 
 
 A child span is the contract rather than an event because it shows in Phoenix's trace tree and waterfall and can be filtered by name and attribute through the REST API; an event is accepted too.
 
+The Buzz fork writes more on a steer span, all optional for the reader: `nostr.sender_pubkey`, `steer.uuid`, `steer.delivered`, `steer.end_reason` (`echo`, `result` or `turn_end`), and a `steer_spans_capped` event on the turn when it stopped writing them. Its `input.value` is the whole block the agent was handed (a framing line, the Buzz envelope, a closing note); buzz-trace takes the envelope's `Content:` line as the message. `steer.delivered=false` means the turn ended before the message reached it: it is listed as `not delivered`, not counted and not linked to, because nothing says that any turn ran it.
+
 ### Steered messages
 
 With `turn_handling: steer`, a message that arrives while a turn runs is injected into it and starts no trace, so Phoenix shows one message for four. buzz-trace reads the `steer` records:
@@ -230,7 +232,13 @@ With `turn_handling: steer`, a message that arrives while a turn runs is injecte
 │    ↳ steered 6e1a22f0… (later) "And please say who on our side will send the data model."
 ```
 
-Where nothing recorded them, a reply call that answered a message other than the opening one still shows it (`inferred from a reply call; text not recorded`); otherwise the report says `steered messages are not recorded in this trace`.
+```
+│  Handled  : 2 messages (1 steered)
+│    ↳ steered 9c3d1e7a… (now) "One more thing…"
+│    ↳ not delivered 6e1a22f0… (now) "Too late…" — the turn ended before it reached it
+```
+
+Where nothing recorded them, a reply call that answered a message other than the opening one still shows it (`inferred from a reply call; text not recorded`). Otherwise the report says `steered messages are not recorded in this trace`, but only for a turn with no sign that its runtime writes the contract: no `steer` record, no recorded posted id (a runtime that writes ids writes steer spans), and no such turn of the same agent in the thread. A turn whose runtime does write them and had nothing steered reads plainly `Handled  : 1 message`.
 
 ---
 
@@ -240,12 +248,12 @@ Where nothing recorded them, a reply call that answered a message other than the
 | :--- | :--- |
 | `posted_event_ids`, `posts[]` | ids of the messages each turn posted (when recorded), and each reply call: `event_id` (or null), `reply_to`, `text`, `at` |
 | `answered_event_ids` | the messages the turn's reply calls answered |
-| `handled_messages`, `steered[]` | messages the turn handled, and the steered ones: `event_id`, `text`, `sender`, `priority`, `at`, `source` (`span`, `event` or `reply_call`) |
+| `handled_messages`, `steered[]` | messages the turn handled, and the steered ones: `event_id`, `text`, `sender`, `sender_pubkey`, `priority`, `at`, `source` (`span`, `event` or `reply_call`), and, when recorded, `delivered` (false: not counted) and `end_reason`; `steered_capped` when the list is cut off |
 | `parent_message` | `{ id, basis, posted_by_turn, turns }`; `basis` is `posted`, `started`, `steered`, `inferred`, `ambiguous`, `thread_root` or `unknown` |
 | `parent_edge`: `AMBIGUOUS`, `parent_candidates` | no parent is picked; the turns that could have posted the parent message |
-| `steering` | `recorded` or `not_recorded` for the thread |
+| `steering`, `steering_recorded` | whether a steered message would show in the trace: `recorded` or `not_recorded` for the thread, and `true` or `false` for each turn |
 
-Compact output (`--compact --json`) adds, only when they apply: `parent_msg` and `posted_ids` (the first 8 hex), `edge: "ambiguous"` with `candidates`, `msgs` and `steered`, and a thread-level `steering: "not_recorded"`.
+Compact output (`--compact --json`) adds, only when they apply: `parent_msg` and `posted_ids` (the first 8 hex), `edge: "ambiguous"` with `candidates`, `msgs` and `steered` (with `not_delivered` and `steered_capped` beside them), and a thread-level `steering: "not_recorded"`.
 
 ---
 

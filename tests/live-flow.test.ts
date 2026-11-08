@@ -6,7 +6,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { main } from "../src/cli.js";
 import { FakePhoenix, restFromNode } from "./helpers/fake-phoenix.js";
-import { hex, THREAD_C, threadC, turnSpans } from "./helpers/phoenix-thread.js";
+import { hex, HUMAN, steerBlock, THREAD_C, threadC, turnSpans } from "./helpers/phoenix-thread.js";
 
 const API_KEY = "fake-api-key-LIVE0001";
 const EMAIL = "someone@example.test";
@@ -131,6 +131,47 @@ describe("a thread recorded under the contract", () => {
     expect(fourth.handled_messages).toBe(3);
     expect(fourth.steered.map((m: { event_id: string }) => m.event_id)).toEqual([hex("c-steer-1"), hex("c-steer-2")]);
     expect(json.turns[2].parent_message).toEqual({ id: THREAD_C.kentMessage, basis: "posted", posted_by_turn: 1, turns: [1] });
+  });
+});
+
+describe("a turn the Buzz fork recorded, steers and all", () => {
+  beforeEach(() => {
+    vi.stubEnv("PHOENIX_API_KEY", API_KEY);
+    const root = THREAD_C.root;
+    load(
+      turnSpans({
+        trace: "f1",
+        agent: "ba-paul-twin",
+        event: root,
+        root,
+        start: 0,
+        end: 16,
+        steers: [
+          { eventId: hex("f-m1"), text: steerBlock({ eventId: hex("f-m1"), root, content: "@Paul Twin Separate question: which SAP table holds material descriptions?" }), at: 3, priority: "now", delivered: true, endReason: "echo", senderPubkey: HUMAN },
+          { eventId: hex("f-m2"), text: steerBlock({ eventId: hex("f-m2"), root, content: "@Paul Twin too late for this one" }), at: 15, priority: "now", delivered: false, endReason: "turn_end", senderPubkey: HUMAN },
+        ],
+        posts: [{ replyTo: root, text: "MAKT is the table of material descriptions.", at: 8, eventId: hex("f-post") }],
+      }),
+    );
+  });
+
+  it("reads the question from the block, counts what was delivered, and does not call the trace unrecorded", async () => {
+    expect(await main(["inspect", THREAD_C.root, "--no-color"])).toBe(0);
+    const text = printed();
+    expect(text).toContain("Handled  : 2 messages (1 steered)");
+    expect(text).toContain(`↳ steered ${hex("f-m1").slice(0, 8)}… (now) "@Paul Twin Separate question: which SAP table holds material descriptions?"`);
+    expect(text).toContain(`↳ not delivered ${hex("f-m2").slice(0, 8)}… (now) "@Paul Twin too late for this one" — the turn ended before it reached it`);
+    expect(text).toContain(`Posted   : ${hex("f-post").slice(0, 8)}…  "MAKT is the table of material descriptions."`);
+    expect(text).not.toContain("not recorded");
+    expect(text).not.toContain("arrived while you were working");
+  });
+
+  it("keeps that answer when only the last turn is asked for", async () => {
+    await main(["query", THREAD_C.root, "--last", "1", "--compact", "--json", "--flat"]);
+    const json = JSON.parse(out[0]);
+    expect(json.steering).toBeUndefined();
+    expect(json.turns[0].msgs).toBe(2);
+    expect(json.turns[0].not_delivered).toHaveLength(1);
   });
 });
 

@@ -4,7 +4,7 @@
  */
 
 import { ThreadTelemetry } from "../models.js";
-import { describeParent, describeSteered, formatCost, handledLabel, ID_NOT_RECORDED, shortId, STEERING_NOT_RECORDED } from "./edge-label.js";
+import { deliveredSteers, describeParent, describeSteered, formatCost, handledLabel, ID_NOT_RECORDED, shortId, STEER_CAPPED_NOTE, STEERING_NOT_RECORDED } from "./edge-label.js";
 
 export class TerminalRenderer {
   readonly useColors: boolean;
@@ -149,12 +149,14 @@ export class TerminalRenderer {
       if (turn.nostrEventId) {
         lines.push(`  ${this.dim("│")}  ${this.bold("Event ID :")} ${turn.nostrEventId}`);
       }
-      const steered = turn.steered ?? [];
       lines.push(
-        `  ${this.dim("│")}  ${this.bold("Handled  :")} ${handledLabel(turn)}${steered.length === 0 && !t.steeringRecorded ? ` — ${STEERING_NOT_RECORDED}` : ""}`,
+        `  ${this.dim("│")}  ${this.bold("Handled  :")} ${handledLabel(turn)}${deliveredSteers(turn).length === 0 && !turn.steeringRecorded ? ` — ${STEERING_NOT_RECORDED}` : ""}`,
       );
-      for (const message of steered) {
-        lines.push(`  ${this.dim("│")}    ↳ steered ${describeSteered(message)}`);
+      for (const message of turn.steered ?? []) {
+        lines.push(`  ${this.dim("│")}    ↳ ${message.delivered === false ? "not delivered" : "steered"} ${describeSteered(message)}`);
+      }
+      if (turn.steerCapped) {
+        lines.push(`  ${this.dim("│")}    ↳ ${STEER_CAPPED_NOTE}`);
       }
       if (turn.senderName) {
         lines.push(`  ${this.dim("│")}  ${this.bold("From     :")} ${turn.senderName}`);
