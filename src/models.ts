@@ -7,6 +7,13 @@ export interface SpanContext {
   trace_id?: string;
 }
 
+/** A span event as Phoenix returns it: `{name, timestamp, attributes}`. */
+export interface SpanEventData {
+  name?: string;
+  timestamp?: string;
+  attributes?: Record<string, unknown>;
+}
+
 export interface SpanNodeData {
   id?: string;
   span_id?: string;
@@ -20,6 +27,7 @@ export interface SpanNodeData {
   status_code?: string;
   status_message?: string | null;
   attributes?: Record<string, unknown>;
+  events?: SpanEventData[] | null;
 }
 
 export function flattenAttributes(obj: Record<string, unknown>, prefix = ""): Record<string, unknown> {
@@ -36,14 +44,22 @@ export function flattenAttributes(obj: Record<string, unknown>, prefix = ""): Re
 }
 
 /**
- * A span time as a Date. Phoenix's SQLite stores naive UTC (`2026-11-08 01:13:33.096000`): JavaScript would read that as
- * the machine's local time, so a time without a zone is taken as UTC. A time that names its zone (`Z`, `+07:00`) is kept.
+ * A span time as a Date. Phoenix's API names the zone of every time (`2026-11-08T01:13:33.096000+00:00`) and that is kept.
+ * A time without a zone is read as UTC, never as the machine's local time, which JavaScript would otherwise assume: a span
+ * must show the same instant on every machine.
  */
 export function parseSpanTime(value: string): Date {
   const text = value.trim();
   const hasZone = /(?:Z|[+-]\d{2}(?::?\d{2})?)$/i.test(text.replace(/^\d{4}-\d{2}-\d{2}/, ""));
   const parsed = new Date(hasZone ? text.replace(" ", "T") : `${text.replace(" ", "T")}Z`);
   return Number.isNaN(parsed.getTime()) ? new Date(text) : parsed;
+}
+
+/** An event of a span, with its time as a Date and its attributes flattened the way a span's are. */
+export interface SpanEventNode {
+  name: string;
+  time?: Date;
+  attributes: Record<string, unknown>;
 }
 
 export class SpanNode {
@@ -58,6 +74,7 @@ export class SpanNode {
   statusCode: string;
   statusMessage?: string | null;
   attributes: Record<string, unknown>;
+  events: SpanEventNode[];
 
   constructor(data: SpanNodeData) {
     this.spanId = data.context?.span_id || data.span_id || data.id || "";
@@ -69,6 +86,16 @@ export class SpanNode {
     this.statusMessage = data.status_message || null;
     const rawAttrs = data.attributes || {};
     this.attributes = { ...flattenAttributes(rawAttrs), ...rawAttrs };
+    this.events = (Array.isArray(data.events) ? data.events : [])
+      .filter((e): e is SpanEventData => Boolean(e) && typeof e === "object" && typeof e.name === "string")
+      .map((e) => {
+        const raw = e.attributes && typeof e.attributes === "object" ? e.attributes : {};
+        return {
+          name: e.name as string,
+          time: typeof e.timestamp === "string" && e.timestamp ? parseSpanTime(e.timestamp) : undefined,
+          attributes: { ...flattenAttributes(raw), ...raw },
+        };
+      });
 
     if (data.start_time) {
       this.startTime = parseSpanTime(data.start_time);
@@ -122,14 +149,40 @@ export interface Anomaly {
 
 /**
  * How a turn was linked to its parent turn:
- * - REPLY_TO: the message that started the turn replies to a message we can tie to that turn exactly — the message
- *   that started it, or (when telemetry records posted event ids) a message it posted;
- * - INFERRED: the message replies to an event no turn is known for (in a Buzz thread, almost always an agent's own
- *   reply), so the parent is the latest turn of the same thread that had finished by then;
+ * - REPLY_TO: the message that started the turn replies to a message we can tie to a turn exactly: the message
+ *   that started it, a message it took in while it ran, or a message it posted (recorded as `nostr.posted_event_id`);
+ * - INFERRED: the message replies to one that no span names. Exactly one turn could have posted it (it had a reply call
+ *   that could have created it, and no other message needs that call), so that turn is named, as an inference;
+ * - AMBIGUOUS: the same, but several turns could have posted it. No parent is picked: `parentCandidates` lists them;
  * - THREAD_ROOT: only the thread's root ties the turn to the turn the root started;
  * - TEMPORAL: ordering only.
  */
-export type ThreadEdgeType = "REPLY_TO" | "INFERRED" | "THREAD_ROOT" | "TEMPORAL";
+export type ThreadEdgeType = "REPLY_TO" | "INFERRED" | "AMBIGUOUS" | "THREAD_ROOT" | "TEMPORAL";
+
+/** What the parent message of a turn is known to be (see `AgentTurn.parentMessage`). */
+export type ParentBasis = "posted" | "started" | "steered" | "inferred" | "ambiguous" | "thread_root" | "unknown";
+
+export interface ParentMessage {
+  /** The message the turn's trigger replies to (`nostr.reply_to_id`). */
+  id: string;
+  basis: ParentBasis;
+  /** The turn that posted it, when that is known (recorded or inferred); null otherwise. */
+  postedByTurn: number | null;
+  /** The turns the basis names: those that started it, took it in, posted it, or (ambiguous) could have posted it. */
+  turns: number[];
+}
+
+/** A message that was injected into a running turn (steered), and how buzz-trace knows of it. */
+export interface SteeredMessage {
+  eventId: string | null;
+  text: string | null;
+  sender: string | null;
+  priority: string | null;
+  /** When it was delivered to the turn (epoch milliseconds), if recorded. */
+  at: number | null;
+  /** `span`/`event`: recorded by the runtime (the contract). `reply_call`: only inferred from a reply call that answered it. */
+  source: "span" | "event" | "reply_call";
+}
 
 export interface ThreadDAGEdge {
   fromTurnIndex: number;
@@ -149,12 +202,15 @@ export interface ThreadDAG {
   branches: ThreadBranch[];
 }
 
-/** One call to a posting tool: when it ran, what it was given to say and which message it answered. */
+/** One call to a posting tool: when it ran, what it was given to say, which message it answered and, if recorded, which it created. */
 export interface PostRecord {
+  spanId: string;
   start: number;
   end: number;
   text: string | null;
   replyTo: string | null;
+  /** The id of the message the call created (`nostr.posted_event_id`), null when the span does not record it. */
+  eventId: string | null;
 }
 
 export interface AgentTurn {
@@ -174,18 +230,25 @@ export interface AgentTurn {
   postedEventIds?: string[];
   /** Event ids the turn's reply calls answered (`reply_to`), in order. */
   answeredEventIds?: string[];
-  /** The turn's posting calls (epoch milliseconds), used to match them with the relay's messages. */
+  /** The turn's posting calls (epoch milliseconds), each with the id of the message it created when that is recorded. */
   posts?: PostRecord[];
   /**
-   * Messages the turn answered that did not start it: with steering, a message that arrives while a turn runs is injected
-   * into it and never starts a trace. Excludes the thread's root, the trigger's parent and other turns' triggers.
+   * The messages that arrived while the turn ran and were injected into it (steered), in the order they arrived. Recorded
+   * by the runtime as `steer` spans or events, or, where nothing recorded them, inferred from a reply call that answered
+   * a message other than the one that started the turn. Never holds the opening message.
    */
+  steered?: SteeredMessage[];
+  /** The ids of `steered`, where known. Excludes the thread's root, the trigger's parent and other turns' triggers. */
   steeredEventIds?: string[];
+  /** The messages the turn handled: the one that started it, plus the steered ones. */
+  handledMessages?: number;
   parentTurnIndex?: number | null;
-  /** How the parent was found; null for a root turn. */
+  /** How the parent was found; null for a root turn, and for an AMBIGUOUS one (see `parentCandidates`). */
   parentEdgeType?: ThreadEdgeType | null;
-  /** Other turns that fit an INFERRED parent as well (they finished together, from other agents). */
-  parentAlternatives?: number[];
+  /** AMBIGUOUS: the turns that could each have posted the parent message, in turn order. No parent is picked. */
+  parentCandidates?: number[];
+  /** What the message this turn replies to is known to be: who posted it, or who could have. Absent for a turn that replies to nothing. */
+  parentMessage?: ParentMessage;
   depth?: number;
   branchId?: string;
   childrenTurnIndices?: number[];
@@ -220,16 +283,19 @@ export interface AgentTurn {
 
 export interface ThreadTelemetryJSON {
   thread_id: string;
-  project: string;
+  /** The project the thread was found in (the one named, else the one Phoenix says holds it); null when not found. */
+  project: string | null;
   session_id: string | null;
   nostr_thread_id?: string | null;
   nostr_channel_id?: string | null;
   phoenix_ui_url?: string | null;
   phoenix_session_url?: string | null;
-  /** Where the telemetry was read from: `sqlite:<path>` or the Phoenix endpoint. */
+  /** Where the telemetry was read from: the Phoenix endpoint. */
   source?: string | null;
   /** For a thread that was not found: every place that was looked in, and what each said. */
   tried?: string[];
+  /** `recorded` when any turn has a `steer` span or event; `not_recorded` when none has (a steered message would not show). */
+  steering?: "recorded" | "not_recorded";
   total_turns: number;
   total_tokens: number;
   total_prompt_tokens: number;
@@ -269,13 +335,34 @@ export interface ThreadTelemetryJSON {
     root_id?: string | null;
     /** Who wrote the message that started the turn. */
     sender?: string | null;
-    /** Messages that arrived while the turn was running and were answered by it (steering). */
+    /** Messages that arrived while the turn was running and were injected into it (steering): their ids, where known. */
     steered_event_ids?: string[];
+    /** The same messages with their text, sender, priority and time, and whether the runtime recorded them (`source`). */
+    steered?: Array<{
+      event_id: string | null;
+      text: string | null;
+      sender: string | null;
+      priority: string | null;
+      at: string | null;
+      source: string;
+    }>;
+    /** Messages the turn handled: the one that started it plus the steered ones. */
+    handled_messages?: number;
+    /** The ids of the messages the turn posted, as far as the spans record them (see `posts`). */
+    posted_event_ids?: string[];
+    /** Each posting call: the message it created (null when not recorded), the one it answered, its text and time. */
+    posts?: Array<{ event_id: string | null; reply_to: string | null; text: string | null; at: string }>;
+    /** The ids of the messages the turn's reply calls answered. */
+    answered_event_ids?: string[];
     parent_turn_index?: number | null;
-    /** How the parent was found: REPLY_TO (exact), INFERRED, THREAD_ROOT; null for a root turn. */
+    /** How the parent was found: REPLY_TO (exact), INFERRED, AMBIGUOUS (none picked), THREAD_ROOT; null for a root turn. */
     parent_edge?: string | null;
-    /** Other turns an INFERRED parent could equally have been. */
+    /** AMBIGUOUS: the turns that could have posted the parent message. */
+    parent_candidates?: number[];
+    /** Same as `parent_candidates`; the name 0.3 used for the other turns an inferred parent could have been. */
     parent_alternatives?: number[];
+    /** The message the turn replies to, how it is known, and who posted it (or who could have). */
+    parent_message?: { id: string; basis: string; posted_by_turn: number | null; turns: number[] };
     depth?: number;
     branch_id?: string;
     children_turn_indices?: number[];
@@ -315,7 +402,8 @@ export interface ThreadTelemetryJSON {
 
 export class ThreadTelemetry {
   threadId: string;
-  project: string;
+  /** The project the thread was found in; null when it was not named and the thread was not found. */
+  project: string | null;
   sessionId: string | null;
   nostrThreadId?: string | null;
   nostrChannelId?: string | null;
@@ -334,16 +422,16 @@ export class ThreadTelemetry {
   dag?: ThreadDAG;
   turns: AgentTurn[];
   anomalies: Anomaly[];
-  /** Where the telemetry was read from (`sqlite:<path>` or the Phoenix endpoint); null when nothing was found. */
+  /** Where the telemetry was read from (the Phoenix endpoint); null when nothing was found. */
   source: string | null;
-  /** When the relay's thread was joined in (`--messages`): how many messages were read and how many replies matched. */
-  relayMessages: { read: number; linked: number } | null;
+  /** Whether any turn of the thread has a `steer` span or event: when false, a steered message would not show in the trace. */
+  steeringRecorded: boolean;
   /** Every place that was looked in for the thread, and what each said (kept for a NOT_FOUND). */
   sourcesTried: string[];
 
   constructor(init: Partial<ThreadTelemetry>) {
     this.threadId = init.threadId || "";
-    this.project = init.project || "mobile";
+    this.project = init.project || null;
     this.sessionId = init.sessionId || null;
     this.nostrThreadId = init.nostrThreadId || null;
     this.nostrChannelId = init.nostrChannelId || null;
@@ -362,7 +450,7 @@ export class ThreadTelemetry {
     this.turns = init.turns || [];
     this.anomalies = init.anomalies || [];
     this.source = init.source ?? null;
-    this.relayMessages = init.relayMessages ?? null;
+    this.steeringRecorded = init.steeringRecorded ?? false;
     this.sourcesTried = init.sourcesTried ?? [];
   }
 
@@ -377,6 +465,7 @@ export class ThreadTelemetry {
       phoenix_session_url: this.phoenixSessionUrl || null,
       source: this.source,
       ...(this.status === "NOT_FOUND" && this.sourcesTried.length > 0 ? { tried: this.sourcesTried } : {}),
+      ...(this.turns.length > 0 ? { steering: this.steeringRecorded ? ("recorded" as const) : ("not_recorded" as const) } : {}),
       total_turns: this.totalTurns,
       total_tokens: this.totalTokens,
       total_prompt_tokens: this.totalPromptTokens,
@@ -416,10 +505,41 @@ export class ThreadTelemetry {
         root_id: t.nostrRootId ?? null,
         sender: t.senderName ?? null,
         ...(t.steeredEventIds && t.steeredEventIds.length > 0 ? { steered_event_ids: t.steeredEventIds } : {}),
+        ...(t.steered && t.steered.length > 0
+          ? {
+              steered: t.steered.map((m) => ({
+                event_id: m.eventId,
+                text: m.text,
+                sender: m.sender,
+                priority: m.priority,
+                at: m.at === null ? null : new Date(m.at).toISOString(),
+                source: m.source,
+              })),
+            }
+          : {}),
+        handled_messages: t.handledMessages ?? 1,
+        posted_event_ids: t.postedEventIds ?? [],
+        posts: (t.posts ?? []).map((p) => ({
+          event_id: p.eventId,
+          reply_to: p.replyTo,
+          text: p.text,
+          at: new Date(p.start).toISOString(),
+        })),
+        answered_event_ids: t.answeredEventIds ?? [],
         parent_turn_index: t.parentTurnIndex ?? null,
         parent_edge: t.parentEdgeType ?? null,
-        ...(t.parentAlternatives && t.parentAlternatives.length > 0
-          ? { parent_alternatives: t.parentAlternatives }
+        ...(t.parentCandidates && t.parentCandidates.length > 0
+          ? { parent_candidates: t.parentCandidates, parent_alternatives: t.parentCandidates }
+          : {}),
+        ...(t.parentMessage
+          ? {
+              parent_message: {
+                id: t.parentMessage.id,
+                basis: t.parentMessage.basis,
+                posted_by_turn: t.parentMessage.postedByTurn,
+                turns: t.parentMessage.turns,
+              },
+            }
           : {}),
         depth: t.depth ?? 0,
         branch_id: t.branchId || "main",

@@ -55,6 +55,8 @@ export class JsonRenderer {
         ...(telemetry.totalCostUsd !== null && telemetry.totalCostUsd !== undefined
           ? { cost_usd: Number(telemetry.totalCostUsd.toFixed(4)) }
           : {}),
+        // Without a `steer` record anywhere, a message that arrived while a turn ran would not show: say so once.
+        ...(telemetry.turns.length > 0 && !telemetry.steeringRecorded ? { steering: "not_recorded" } : {}),
         ...(compactAnomalies.length > 0
           ? {
               anomalies: compactAnomalies.map((a) => ({
@@ -69,12 +71,25 @@ export class JsonRenderer {
           return {
             turn: t.turnIndex,
             agent: t.agentName,
-            // The turn this one continues. `edge` is only said when that link is not exact (the default).
+            // The turn this one continues. `edge` is only said when that link is not exact (the default). An
+            // AMBIGUOUS link has no parent: `candidates` are the turns that could have posted the parent message.
             ...(t.parentTurnIndex ? { parent: t.parentTurnIndex } : {}),
-            // With steering a message that arrives mid-turn is answered by the running turn: say how many it handled.
-            ...(t.steeredEventIds && t.steeredEventIds.length > 0 ? { msgs: 1 + t.steeredEventIds.length } : {}),
-            ...(t.parentTurnIndex && t.parentEdgeType && t.parentEdgeType !== "REPLY_TO"
+            ...(t.parentEdgeType && t.parentEdgeType !== "REPLY_TO" && (t.parentTurnIndex || t.parentEdgeType === "AMBIGUOUS")
               ? { edge: t.parentEdgeType.toLowerCase() }
+              : {}),
+            ...(t.parentCandidates && t.parentCandidates.length > 0 ? { candidates: t.parentCandidates } : {}),
+            // The first 8 hex of the message this turn replies to, and of the messages it posted (when recorded).
+            ...(t.parentMessage ? { parent_msg: t.parentMessage.id.slice(0, 8) } : {}),
+            ...(t.postedEventIds && t.postedEventIds.length > 0 ? { posted_ids: t.postedEventIds.map((id) => id.slice(0, 8)) } : {}),
+            // With steering a message that arrives mid-turn is injected into the running turn: how many it handled, and which.
+            ...(t.steered && t.steered.length > 0
+              ? {
+                  msgs: t.handledMessages ?? 1 + t.steered.length,
+                  steered: t.steered.map((m) => ({
+                    id: m.eventId ? m.eventId.slice(0, 8) : null,
+                    ...(m.text ? { text: m.text.length > 80 ? m.text.slice(0, 80) : m.text } : {}),
+                  })),
+                }
               : {}),
             status: t.statusCode,
             dur_s: Number((t.durationMs / 1000).toFixed(1)),

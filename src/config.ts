@@ -1,84 +1,71 @@
 /**
- * Configuration and environment auto-detection for buzz-trace.
+ * Configuration for buzz-trace: where Phoenix is, with which credentials, and which project.
+ *
+ * The default source is the live Phoenix. Its endpoint comes from `--endpoint`, `PHOENIX_ENDPOINT`, `PHOENIX_URL`
+ * (`PHOENIX_COLLECTOR_ENDPOINT` as a last resort), else http://localhost:6006. The project comes from `--project` or
+ * `PHOENIX_PROJECT`; when neither is set it is null and buzz-trace asks Phoenix which project holds the thread, so there is
+ * no default project to get wrong. Phoenix's server API is the only source: there is no file to read.
+ *
+ * Credentials: `--api-key` / `PHOENIX_API_KEY` (Bearer), else `PHOENIX_EMAIL` with `PHOENIX_PASSWORD` (sign-in). They are
+ * never enumerable properties, so printing, logging or serializing a Config cannot show them; the password and the email
+ * are read from the environment only, never from the command line.
  */
 
-import * as fs from "node:fs";
-import * as os from "node:os";
-import * as path from "node:path";
+import type { PhoenixCredentials } from "./clients/phoenix-auth.js";
 
 export interface ConfigOptions {
   endpoint?: string;
   uiEndpoint?: string;
   project?: string;
-  dbPath?: string;
   timeout?: number;
   showSecrets?: boolean;
   /** A Phoenix API key, for a server that has authentication on. Falls back to PHOENIX_API_KEY. */
   apiKey?: string;
-  /** A file (or `-` for stdin) holding the relay's thread as `buzz messages thread --format json` prints it. */
-  messagesPath?: string;
+}
+
+function trimEndpoint(url: string): string {
+  let out = url.replace(/\/+$/, "");
+  if (out.endsWith("/v1")) {
+    out = out.slice(0, -3);
+  }
+  return out;
 }
 
 export class Config {
   endpoint: string;
   uiEndpoint: string;
-  project: string;
-  dbPath: string | null;
+  /** The project named by `--project` or `PHOENIX_PROJECT`; null means "find it from the thread". */
+  project: string | null;
   timeout: number;
   showSecrets: boolean;
-  messagesPath: string | null;
-  /** Never enumerable, so serializing or logging a Config cannot print it. */
+  /** Never enumerable, so serializing or logging a Config cannot print them. */
   declare readonly apiKey: string | null;
+  declare readonly email: string | null;
+  declare readonly password: string | null;
 
   constructor(options: ConfigOptions = {}) {
-    let resolvedEndpoint =
+    this.endpoint = trimEndpoint(
       options.endpoint ||
-      process.env.PHOENIX_ENDPOINT ||
-      process.env.PHOENIX_COLLECTOR_ENDPOINT ||
-      "http://localhost:6006";
+        process.env.PHOENIX_ENDPOINT ||
+        process.env.PHOENIX_URL ||
+        process.env.PHOENIX_COLLECTOR_ENDPOINT ||
+        "http://localhost:6006",
+    );
+    this.uiEndpoint = trimEndpoint(options.uiEndpoint || process.env.PHOENIX_UI_ENDPOINT || this.endpoint);
 
-    // Normalize endpoint (strip trailing slashes and /v1 suffix)
-    resolvedEndpoint = resolvedEndpoint.replace(/\/+$/, "");
-    if (resolvedEndpoint.endsWith("/v1")) {
-      resolvedEndpoint = resolvedEndpoint.slice(0, -3);
-    }
-
-    this.endpoint = resolvedEndpoint;
-
-    let resolvedUi =
-      options.uiEndpoint ||
-      process.env.PHOENIX_UI_ENDPOINT ||
-      this.endpoint;
-    resolvedUi = resolvedUi.replace(/\/+$/, "");
-    if (resolvedUi.endsWith("/v1")) {
-      resolvedUi = resolvedUi.slice(0, -3);
-    }
-    this.uiEndpoint = resolvedUi;
-
-    this.project = options.project || process.env.PHOENIX_PROJECT || "mobile";
-    this.timeout = options.timeout ?? 10000;
+    this.project = options.project || process.env.PHOENIX_PROJECT || null;
+    this.timeout = options.timeout ?? 30000;
     this.showSecrets = options.showSecrets ?? false;
-    this.messagesPath = options.messagesPath ?? null;
-    Object.defineProperty(this, "apiKey", {
-      value: options.apiKey || process.env.PHOENIX_API_KEY || null,
-      enumerable: false,
-    });
 
-    // Resolve SQLite DB path
-    let resolvedDb = options.dbPath || process.env.PHOENIX_DB_PATH || null;
-    if (!resolvedDb) {
-      const candidates = [
-        "/root/.phoenix/phoenix.db",
-        path.join(os.homedir(), ".phoenix", "phoenix.db"),
-      ];
-      for (const candidate of candidates) {
-        if (fs.existsSync(candidate)) {
-          resolvedDb = candidate;
-          break;
-        }
-      }
-    }
-    this.dbPath = resolvedDb;
+    const secret = (value: string | null | undefined) => ({ value: value || null, enumerable: false });
+    Object.defineProperty(this, "apiKey", secret(options.apiKey || process.env.PHOENIX_API_KEY));
+    Object.defineProperty(this, "email", secret(process.env.PHOENIX_EMAIL));
+    Object.defineProperty(this, "password", secret(process.env.PHOENIX_PASSWORD));
+  }
+
+  /** What the Phoenix client signs in with. */
+  credentials(): PhoenixCredentials {
+    return { apiKey: this.apiKey, email: this.email, password: this.password };
   }
 
   /**

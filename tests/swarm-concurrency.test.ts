@@ -306,7 +306,7 @@ describe("10-Agent Swarm Concurrency & Branching Topology Simulation", () => {
     expect(mdText).toContain("Turn Timeline");
   });
 
-  it("completes DAG aggregation in under 1ms for 10 agents and 100+ spans", () => {
+  it("completes DAG aggregation in a few milliseconds for 10 agents and 100+ spans", () => {
     const { threadId, allSpans } = buildSwarmFixture();
     const agg = new ThreadAggregator(threadId, "mobile");
 
@@ -321,7 +321,9 @@ describe("10-Agent Swarm Concurrency & Branching Topology Simulation", () => {
       agg.aggregate(allSpans);
     }
     const avgMs = (performance.now() - start) / runs;
-    expect(avgMs).toBeLessThan(1.0); // Strict performance target: < 1.0 ms
+    // About 0.2 ms alone. It is wall-clock time, and the suite's other files run at the same time (and under coverage in CI):
+    // a 1 ms limit failed one run in four there. 5 ms still catches an algorithmic regression.
+    expect(avgMs).toBeLessThan(5.0);
   });
 
   it("filters single turn AI self-reflection query to under 200 tokens", () => {

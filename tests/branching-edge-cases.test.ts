@@ -199,14 +199,14 @@ describe("Subagent 2.2: Branching Edge Cases & Relayed Resolution", () => {
       expect(telemetry.turns[0].turnIndex).toBe(1);
       expect(telemetry.turns[0].depth).toBe(0);
 
-      // The reply answers the agent's own response: the latest turn of the thread that had finished wrote it. No
-      // message ties the two exactly, so the edge says it was inferred.
+      // The reply answers a message no span names, and no turn is recorded to have posted anything, so none could have
+      // created it. Only the thread's root ties the reply to a turn, and the edge says so.
       expect(telemetry.turns[1].turnIndex).toBe(2);
       expect(telemetry.turns[1].parentTurnIndex).toBe(1);
-      expect(telemetry.turns[1].parentEdgeType).toBe("INFERRED");
+      expect(telemetry.turns[1].parentEdgeType).toBe("THREAD_ROOT");
       expect(telemetry.turns[1].depth).toBe(1);
       expect(telemetry.dag?.edges).toEqual([
-        { fromTurnIndex: 1, toTurnIndex: 2, type: "INFERRED" },
+        { fromTurnIndex: 1, toTurnIndex: 2, type: "THREAD_ROOT" },
       ]);
     });
 

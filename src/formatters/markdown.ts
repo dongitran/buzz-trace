@@ -4,7 +4,7 @@
  */
 
 import { ThreadTelemetry } from "../models.js";
-import { edgeLabel, formatCost } from "./edge-label.js";
+import { describePoster, edgeLabel, formatCost, handledLabel, ID_NOT_RECORDED, shortId, STEERING_NOT_RECORDED } from "./edge-label.js";
 
 const POSTED_CHARS = 300;
 
@@ -23,14 +23,14 @@ export class MarkdownRenderer {
       lines.push("");
     };
 
-    const shortId = t.threadId.length > 16 ? `${t.threadId.slice(0, 16)}...` : t.threadId;
-    lines.push(`# Thread Execution Report: \`${shortId}\``);
+    const threadLabel = t.threadId.length > 16 ? `${t.threadId.slice(0, 16)}...` : t.threadId;
+    lines.push(`# Thread Execution Report: \`${threadLabel}\``);
     lines.push("");
     heading("Overview");
     lines.push("| Metric | Value |");
     lines.push("| :--- | :--- |");
     lines.push(`| **Thread Root ID** | \`${t.threadId}\` |`);
-    lines.push(`| **Project** | \`${t.project}\` |`);
+    lines.push(`| **Project** | \`${t.project ?? "(not found)"}\` |`);
     lines.push(`| **Session ID** | \`${t.sessionId || "N/A"}\` |`);
     if (t.source) {
       lines.push(`| **Source** | \`${t.source}\` |`);
@@ -56,10 +56,15 @@ export class MarkdownRenderer {
       lines.push("");
     }
 
-    if (t.dag && t.dag.edges.length > 0) {
+    const possible = t.turns.filter((x) => (x.parentCandidates?.length ?? 0) > 0);
+    if (t.dag && (t.dag.edges.length > 0 || possible.length > 0)) {
       heading("Multi-Agent DAG Hierarchy");
       lines.push("```mermaid");
       lines.push("graph TD");
+      const label = (n: number) => {
+        const turn = t.turns.find((x) => x.turnIndex === n);
+        return turn ? `T${n}["Turn ${n}: ${turn.agentName}"]` : `T${n}`;
+      };
       for (const edge of t.dag.edges) {
         const fromTurn = t.turns.find((x) => x.turnIndex === edge.fromTurnIndex);
         const toTurn = t.turns.find((x) => x.turnIndex === edge.toTurnIndex);
@@ -79,6 +84,12 @@ export class MarkdownRenderer {
                 ? "-. by time .->"
                 : "-->";
         lines.push(`  ${fromLabel} ${arrow} ${toLabel}`);
+      }
+      // A parent message no span names, which several turns could have posted: each is only a possible parent.
+      for (const turn of possible) {
+        for (const candidate of turn.parentCandidates ?? []) {
+          lines.push(`  ${label(candidate)} -. possible parent .-> ${label(turn.turnIndex)}`);
+        }
       }
       lines.push("```");
       lines.push("");
@@ -100,6 +111,37 @@ export class MarkdownRenderer {
       );
     }
     lines.push("");
+
+    if (t.turns.length > 0) {
+      heading("Message links");
+      lines.push("| Turn | Agent | Handled | Started by | Replies to | Parent posted by | Posted |");
+      lines.push("| :--- | :--- | :--- | :--- | :--- | :--- | :--- |");
+      for (const turn of t.turns) {
+        const ids = (turn.posts ?? []).map((p) => (p.eventId ? `\`${shortId(p.eventId)}\`` : ID_NOT_RECORDED));
+        const unplaced = (turn.postedEventIds ?? []).filter((id) => !(turn.posts ?? []).some((p) => p.eventId === id)).map((id) => `\`${shortId(id)}\``);
+        const posted = [...ids, ...unplaced].join(", ") || ID_NOT_RECORDED;
+        lines.push(
+          `| **${turn.turnIndex}** | \`${turn.agentName}\` | ${handledLabel(turn).replace(/ messages?/, "")} | ` +
+            `${turn.nostrEventId ? `\`${shortId(turn.nostrEventId)}\`` : "—"} | ` +
+            `${turn.parentMessage ? `\`${shortId(turn.parentMessage.id)}\`` : "—"} | ${describePoster(turn)} | ${posted} |`,
+        );
+      }
+      lines.push("");
+      for (const turn of t.turns) {
+        for (const message of turn.steered ?? []) {
+          const id = message.eventId ? `\`${shortId(message.eventId)}\`` : "a message with no id recorded";
+          const how = message.source === "reply_call" ? " (inferred from a reply call; text not recorded)" : "";
+          lines.push(
+            `- Turn ${turn.turnIndex} · ${turn.agentName} also handled ${id}${message.priority ? ` (${message.priority})` : ""}${message.text ? `: ${oneLine(message.text)}` : ""}${how}`,
+          );
+        }
+      }
+      if (!t.steeringRecorded) {
+        lines.push("");
+        lines.push(`> ${STEERING_NOT_RECORDED.charAt(0).toUpperCase()}${STEERING_NOT_RECORDED.slice(1)}: a message that arrived while a turn was running leaves no span here.`);
+      }
+      lines.push("");
+    }
 
     if (t.turns.some((turn) => (turn.postedTexts?.length ?? 0) > 0)) {
       heading("What the agents posted");

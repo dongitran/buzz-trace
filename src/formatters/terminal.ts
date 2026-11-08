@@ -4,7 +4,7 @@
  */
 
 import { ThreadTelemetry } from "../models.js";
-import { edgeLabel, formatCost } from "./edge-label.js";
+import { describeParent, describeSteered, formatCost, handledLabel, ID_NOT_RECORDED, shortId, STEERING_NOT_RECORDED } from "./edge-label.js";
 
 export class TerminalRenderer {
   readonly useColors: boolean;
@@ -59,7 +59,7 @@ export class TerminalRenderer {
 
     // Metadata
     lines.push(`  ${this.bold("Thread ID   :")} ${this.cyan(t.threadId)}`);
-    lines.push(`  ${this.bold("Project     :")} ${t.project}`);
+    lines.push(`  ${this.bold("Project     :")} ${t.project ?? "(not found)"}`);
     if (t.sessionId && t.sessionId !== t.threadId) {
       lines.push(`  ${this.bold("Session ID  :")} ${t.sessionId}`);
     }
@@ -149,21 +149,20 @@ export class TerminalRenderer {
       if (turn.nostrEventId) {
         lines.push(`  ${this.dim("│")}  ${this.bold("Event ID :")} ${turn.nostrEventId}`);
       }
-      if (turn.steeredEventIds && turn.steeredEventIds.length > 0) {
-        const extra = turn.steeredEventIds.length;
-        lines.push(
-          `  ${this.dim("│")}  ${this.bold("Handled  :")} ${extra + 1} messages (${extra} arrived while the turn was running)`,
-        );
+      const steered = turn.steered ?? [];
+      lines.push(
+        `  ${this.dim("│")}  ${this.bold("Handled  :")} ${handledLabel(turn)}${steered.length === 0 && !t.steeringRecorded ? ` — ${STEERING_NOT_RECORDED}` : ""}`,
+      );
+      for (const message of steered) {
+        lines.push(`  ${this.dim("│")}    ↳ steered ${describeSteered(message)}`);
       }
       if (turn.senderName) {
         lines.push(`  ${this.dim("│")}  ${this.bold("From     :")} ${turn.senderName}`);
       }
-      if (turn.parentTurnIndex) {
-        const branchTag = turn.branchId && turn.branchId !== "main" ? ` [${turn.branchId}]` : "";
-        const how = edgeLabel(turn);
-        lines.push(
-          `  ${this.dim("│")}  ${this.bold("Reply To :")} Turn ${turn.parentTurnIndex}${how ? ` (${how})` : ""}${branchTag}`,
-        );
+      const parent = describeParent(turn, t.turns);
+      if (parent) {
+        const branchTag = turn.parentTurnIndex && turn.branchId && turn.branchId !== "main" ? ` [${turn.branchId}]` : "";
+        lines.push(`  ${this.dim("│")}  ${this.bold("Reply To :")} ${parent}${branchTag}`);
       }
       lines.push(`  ${this.dim("│")}  ${this.bold("Model    :")} ${this.magenta(turn.modelName)}`);
       if (turn.contextPerCall && turn.modelCalls) {
@@ -195,8 +194,19 @@ export class TerminalRenderer {
         lines.push(`  ${this.dim("│")}  ${this.bold("Tools    :")} ${this.dim("(none)")}`);
       }
 
-      if (turn.postedTexts && turn.postedTexts.length > 0) {
-        lines.push(`  ${this.dim("│")}  ${this.bold("Posted   :")} "${turn.responsePreview}"`);
+      const posts = turn.posts ?? [];
+      if (posts.length > 0) {
+        for (const post of posts) {
+          const text = (post.text ?? "").replace(/\s+/g, " ").trim();
+          const shown = text.length > 120 ? `${text.slice(0, 120)}...` : text;
+          lines.push(`  ${this.dim("│")}  ${this.bold("Posted   :")} ${post.eventId ? shortId(post.eventId) : ID_NOT_RECORDED}  "${shown}"`);
+        }
+        const unplaced = (turn.postedEventIds ?? []).filter((id) => !posts.some((post) => post.eventId === id));
+        if (unplaced.length > 0) {
+          lines.push(`  ${this.dim("│")}  ${this.bold("Posted   :")} ${unplaced.map(shortId).join(", ")} (recorded on the turn, not on a call)`);
+        }
+      } else if (turn.postedTexts && turn.postedTexts.length > 0) {
+        lines.push(`  ${this.dim("│")}  ${this.bold("Posted   :")} ${ID_NOT_RECORDED}  "${turn.responsePreview}"`);
       } else if (turn.responsePreview && verbose) {
         lines.push(`  ${this.dim("│")}  ${this.bold("Output   :")} "${turn.responsePreview}"`);
       }

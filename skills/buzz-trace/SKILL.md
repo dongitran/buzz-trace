@@ -15,7 +15,8 @@ Distributed thread observability, AI query engine, and telemetry diagnostic CLI 
 2. **Causality DAG Over Clock Skew**:
    - Distributed containers (across WSL2, NUC, cloud VMs) have millisecond clock drifts.
    - Always trust `reply_to` causality edges over raw timestamps for turn sequencing and thread DAG topology.
-   - Edges have three strengths. No `edge` field in compact output means an exact `reply_to` link. `"edge":"inferred"` means the person answered an agent's own message, which no turn started from, so the parent is the latest finished turn. An `AMBIGUOUS_PARENT` anomaly names the other turns it could equally be. Agents started by one message are siblings, never parent and child.
+   - Edges have four strengths. No `edge` field in compact output means an exact link: the parent message started a turn, was taken into one, or a reply span recorded its id. `"edge":"inferred"` means the parent message is recorded nowhere but exactly one turn could have posted it. `"edge":"ambiguous"` means several could have: there is **no `parent`**, and `candidates` lists them. `"edge":"thread_root"` means only the thread's root ties the turn to a turn. Agents started by one message are siblings, never parent and child.
+   - Phoenix does not hold the id of a message an agent posted unless its runtime records it (`nostr.posted_event_id`). Never treat an `inferred` edge as recorded, and never pick one of `candidates` yourself.
 3. **Tokens Are Summed Over Model Calls**:
    - A turn's `tokens` add up every model call of the turn, and each tool step is one more call that re-reads the whole context. `calls` and `ctx` (shown when a turn made more than one call) give the estimated context of ONE call. Judge context size with `ctx`, never with `tokens`.
    - `CONTEXT_GROWTH` means an agent's context per call keeps growing round after round in a thread session: look for a static block repeated in every prompt.
@@ -37,14 +38,16 @@ Distributed thread observability, AI query engine, and telemetry diagnostic CLI 
 | Inspect specific turn details | `buzz-trace query <thread_id> --turn <N> --tools --compact --json` | ~150 tokens |
 | Filter by specific agent | `buzz-trace query <thread_id> --agent <agent_name> --compact --json` | ~150 tokens |
 | Run automated diagnostics | `buzz-trace analyze <thread_id> --compact --json` | ~180 tokens |
-| Thread cost and who answered whom | `buzz-trace query <thread_id> --compact --json --flat` (`cost_usd`, `parent`, `edge`) | ~200 tokens a turn (861 for a 4-turn thread); add `--last N` |
-| Phoenix with authentication on | `PHOENIX_API_KEY=… buzz-trace query <thread_id> --project <community>` or `--db <copy of phoenix.db>` | same |
+| Thread cost and who answered whom | `buzz-trace query <thread_id> --compact --json --flat` (`cost_usd`, `parent`, `edge`, `candidates`) | ~250 tokens a turn; add `--last N` |
+| Which turn posted message X, what each turn posted | `buzz-trace inspect <thread_id>` (`Reply To`, `Posted`), or `--json` (`parent_message`, `posts`) | Terminal UI |
+| Messages steered into a running turn | `buzz-trace query <thread_id> --compact --json --flat` (`msgs`, `steered`, `steering`) | same |
+| Phoenix with authentication on | `PHOENIX_API_KEY=…` (or `PHOENIX_EMAIL` + `PHOENIX_PASSWORD`) with `PHOENIX_URL=…` set | same |
 | Full human-readable terminal view | `buzz-trace inspect <thread_id> [--project <community>]` | Terminal UI |
 | Watch live thread execution | `buzz-trace watch <thread_id> [--interval 2.0]` | Interactive |
 | List recent thread sessions | `buzz-trace sessions [--limit 10] [--project <community>]` | Terminal UI |
 
 > [!NOTE]
-> The default project is `mobile`. For other communities (e.g., `agent-infra`, `zeusadm`, `simplemdg-v2`), specify `--project <community>`.
+> buzz-trace reads the Phoenix server named by `PHOENIX_ENDPOINT` or `PHOENIX_URL` (or `--endpoint`), and finds the project from the thread: no `--project` is needed. Pass `--project <community>` only to look in that project alone.
 
 ---
 
@@ -210,28 +213,34 @@ buzz-trace context <thread_id> --budget 200 --flat
 
 ---
 
-### 8. Who Answered Whom, and What It Cost (~200 tokens a turn)
+### 8. Who Answered Whom, and What It Cost (~250 tokens a turn)
 
 ```bash
-buzz-trace query <thread_id> --compact --json --flat --project <community>
+buzz-trace query <thread_id> --compact --json --flat
 ```
 
-Read `turns[].parent` (the turn it continues), `turns[].edge` (present only when the link is not exact), `cost_usd` (the thread, USD) and `turns[].ctx`. For one turn's full links use `inspect --json`: `event_id`, `reply_to`, `root_id`, `sender`, `parent_edge`, `posted` (what the turn wrote to the thread) and `tokens.cache_read`.
+Read `turns[].parent` (the turn it continues), `turns[].edge` (present only when the link is not exact), `turns[].candidates` (the turns that could have posted the parent message, when there is no `parent`), `cost_usd` (the thread, USD) and `turns[].ctx`. For one turn's full links use `inspect --json`: `event_id`, `reply_to` (the parent message), `parent_message` (`{ id, basis, posted_by_turn, turns }`), `parent_edge`, `posts` (what the turn wrote to the thread: `event_id` when recorded, `reply_to`, `text`), `posted_event_ids`, and `tokens.cache_read`. Message ids in compact output are their first 8 hex (`parent_msg`, `posted_ids`); `inspect --json` has them whole.
 
-### 9. Make The Parent Links Exact
+### 9. Which Turn Posted This Message?
 
-`"edge":"inferred"` or an `AMBIGUOUS_PARENT` anomaly means a person answered an agent's own message and Phoenix cannot say which turn wrote it. Give buzz-trace the relay's thread and every link becomes exact:
+Ask for the thread (the id of any of its messages works) and read `Reply To` and `Posted` per turn:
 
-```bash
-buzz messages thread --channel <channel_id> --event <thread_root_id> --format json > /tmp/thread.json
-buzz-trace query <thread_root_id> --messages /tmp/thread.json --compact --json --flat --project <community>
+```
+Reply To : message 212193a2… posted by Turn 1 or Turn 2: not recorded, so no parent is picked
+Posted   : id not recorded  "Kent Twin here…"
 ```
 
-The `source` of a full `inspect --json` then ends with `+ relay messages (N read, M linked)`. Times in Phoenix's SQLite are UTC; buzz-trace 0.3 reads them as UTC on any machine.
+- `posted by Turn 1 (…)` with no qualifier: the reply span recorded the id. Exact.
+- `— inferred: the only turn that could have posted it`: a deduction, not a record (it assumes an agent wrote the message, not a person).
+- `Turn 1 or Turn 2: not recorded`: report both. Do not choose. To make it exact, the agent's runtime must write `nostr.posted_event_id` (64 hex) on the reply tool span, or return `event_id <hex>` in the tool's output.
 
-### 10. A Thread Was Not Found
+### 10. Messages Steered Into a Running Turn
 
-`status: "NOT_FOUND"` is an answer about the places that were searched, not about the thread. Read `tried`: it lists each place with what it said, and the write time of a SQLite file. An auto-detected `~/.phoenix/phoenix.db` can be a stale copy made days ago. If Phoenix answered 401 or 403, buzz-trace exits with code 2 and names `PHOENIX_API_KEY` and `--db`.
+`Handled  : 4 messages (3 steered)` lists each steered message with its id and text (compact: `msgs`, `steered`). They are recorded as `steer` child spans (or span events) with `nostr.event_id`, `input.value`, `nostr.sender_name` and `steer.priority`. `steered messages are not recorded in this trace` (compact: `steering: "not_recorded"`) means the runtime wrote none: a message that arrived while a turn ran is simply absent, so "4 messages sent, 1 turn" is not a lost message. A steered message that a reply call answered still shows, marked `inferred from a reply call; text not recorded`.
+
+### 11. A Thread Was Not Found
+
+`status: "NOT_FOUND"` is an answer about the places that were searched, not about the thread. Read `tried`: it says which projects were looked in, and where the session is if it is in another project. If Phoenix answered 401 or 403, buzz-trace exits with code 2 and names `PHOENIX_API_KEY` and `PHOENIX_EMAIL`/`PHOENIX_PASSWORD`; it never reports that as `NOT_FOUND`. A sign-in lasts ten minutes on a default Phoenix; for repeated runs use an API key.
 
 ## Rationalization Table & Traps
 
@@ -241,13 +250,15 @@ The `source` of a full `inspect --json` then ends with `+ relay messages (N read
 | "I only need `--compact`, no need for `--json`." | `--compact` is specifically a modifier for `--json` in structured rendering. Plain text ignores it. | Always pair them: `--compact --json`. |
 | "Timestamps show Turn 2 started before Turn 1 finished, so the trace must be corrupted." | Distributed containers across hosts experience NTP clock jitter. | Trust the topological `reply_to` DAG built by `buzz-trace`, not wall-clock times. |
 | "I can query Phoenix REST API directly with curl." | Raw Phoenix span tables contain unaggregated low-level OTel JSON requiring complex session stitching. | Let `buzz-trace` aggregate spans, compute DAGs, and format metrics. |
-| "Command failed because project was not found." | Default project is `mobile`. | Pass `--project <community>` matching the active Nostr community. |
+| "Command failed because project was not found." | A named `--project` that does not exist, or one the thread is not in. | Read `tried`: it lists the projects Phoenix has. Drop `--project` and buzz-trace finds the thread's project. |
 | "`CONTEXT_GROWTH` means the conversation got long." | Read its message: if most of the growth is "re-sent with every prompt", the agent's harness repeats a static block in each message, whatever the conversation says. | Check the prompt the agent's harness builds, not the thread. |
 | "`tokens` is 170k, so the context is nearly full." | `tokens` is summed over the turn's model calls; 3 calls of 57k read as 170k. | Read `ctx`. TOKEN_BLOAT and TOKEN_INFLATION already judge per call. |
-| "`NOT_FOUND`, so the thread never ran." | It only says the places searched had nothing (a stale local copy, a wrong `--project`). | Read `tried`; pass `--db <live copy>` or `--project <community>`. |
-| "`edge: inferred`, so the thread is unreliable." | It is only the one link that Phoenix cannot prove. | Pass `--messages` with the relay's thread: then every link is exact. |
-| "No `edge` on a turn, so its parent is a guess." | The opposite: no `edge` is the exact link; `inferred` is the guess. | Check `AMBIGUOUS_PARENT` before relying on an inferred parent. |
-| "I sent 4 messages but see 3 turns, so one was lost." | With steering, a message sent while the agent is still answering is handled by the running turn and starts no trace. | Look for `msgs: 2` in compact output (`steered_event_ids` in `inspect --json`): that turn handled both. |
+| "`NOT_FOUND`, so the thread never ran." | It only says the places searched had nothing (a wrong `--endpoint`, a `--project` the thread is not in, spans not exported yet). | Read `tried`; check `PHOENIX_URL` and drop `--project`. |
+| "`edge: inferred`, so the thread is unreliable." | It is only a link Phoenix cannot prove: no span records the id of the message the turn replies to. | Treat it as a deduction. The agent's runtime must record `nostr.posted_event_id` to make it exact. |
+| "`edge: ambiguous` has no parent, so the turn is unrelated." | Several turns could have posted the parent message and buzz-trace will not pick one. | Use `candidates`; do not choose between them. |
+| "No `edge` on a turn, so its parent is a guess." | The opposite: no `edge` is the exact link; `inferred` is the guess. | Check `candidates` and `edge` before relying on a parent. |
+| "`Posted : id not recorded`, so the message was not posted." | The text and time of the reply call are in Phoenix; only the id of the message it created is not, unless the runtime records it. | Read the text of the post; the id needs `nostr.posted_event_id`. |
+| "I sent 4 messages but see 3 turns, so one was lost." | With steering, a message sent while the agent is still answering is handled by the running turn and starts no trace. | Look for `Handled : N messages (K steered)` / `msgs` in compact output. If the report says steered messages are not recorded, the trace cannot show them. |
 | "Two agents answered the same message, so one replied to the other." | They were started by the same message: siblings. | Trust `parent`, not the order of the turns. |
 
 ---

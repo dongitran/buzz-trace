@@ -5,6 +5,68 @@ All notable changes to `buzz-trace` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-11-08
+
+**Breaking: Phoenix's server is now the only source.** buzz-trace reads Phoenix over its API and nothing else: no relay file, no
+`buzz` CLI, no database file. It also answers, honestly, which turn posted a message and which messages a turn handled.
+
+### Removed (breaking)
+- **`--messages <file>`** and everything behind it (the join with the relay's thread, `Config.messagesPath`,
+  `ThreadTelemetry.relayMessages`). Passing it is an argument error. What it did is now done from Phoenix alone, exactly where
+  the agent's runtime records the id of what it posted (see "Telemetry contract" in the README).
+- **`--db <phoenix.db>`**, `PHOENIX_DB_PATH`, the auto-detected `~/.phoenix/phoenix.db` and the `node:sqlite` reader
+  (`PhoenixDBClient`). `--db` now stops with: `--db was removed in 0.4.0: buzz-trace reads the Phoenix server. Set
+  PHOENIX_ENDPOINT (or PHOENIX_URL), or pass --endpoint.` **Migration:** for an offline copy of Phoenix's file, start a local Phoenix
+  on it (`PHOENIX_WORKING_DIR=<folder holding phoenix.db> phoenix serve`) and point `--endpoint` at that.
+- **The default project `mobile`.** With no `--project` and no `PHOENIX_PROJECT`, buzz-trace asks Phoenix which project holds the
+  thread (`GET /v1/sessions/{id}`) and, for an id that is not a session, searches every project. `Config.project` is `null`
+  until then, and `project` in the JSON is the project the thread was found in.
+
+### Added
+- **Signing in.** `--api-key` / `PHOENIX_API_KEY` is sent as a Bearer token. Without a key, `PHOENIX_EMAIL` and
+  `PHOENIX_PASSWORD` sign in (`POST /auth/login`) and the access token is sent as Bearer; a request that is refused refreshes
+  the session (`POST /auth/refresh`, whose refresh token rotates) or signs in again, once. A key that Phoenix rejects gives way to
+  the email and password when both are set. A command signs in once (`diff` and `watch` share the session). No credential is printed,
+  put in a URL or left in an error (errors are redacted; a `Config` or client cannot be printed with its credentials), and the
+  password and email are read from the environment only. A 429 on sign-in says so and points to an API key.
+- **`PHOENIX_URL`** as an endpoint (after `--endpoint` and `PHOENIX_ENDPOINT`).
+- **Which turn posted a message.** `Reply To : message 212193a2… posted by Turn 1 (ba-kent-twin)` and, per turn,
+  `Posted   : 5724e661…  "text"`. The contract is `nostr.posted_event_id` on the reply tool span, or `event_id <64 hex>` in
+  that span's `output.value` or `tool.output`; all names are constants of `src/contract.ts`. JSON: `posted_event_ids`, `posts[]`,
+  `answered_event_ids`, `parent_message { id, basis, posted_by_turn, turns }`. Compact: `parent_msg`, `posted_ids`.
+- **Steered messages.** A child span named `steer` under the turn's `agent_turn` span (or a span event of that name) with
+  `nostr.event_id`, `input.value`, `nostr.sender_name` and `steer.priority` is read as a message injected into the running turn:
+  `Handled  : 4 messages (3 steered)` with each id and text (JSON `handled_messages`, `steered[]`; compact `msgs`, `steered`).
+  Where nothing recorded them the report says `steered messages are not recorded in this trace` (`steering: "not_recorded"`), and
+  a steered message that a reply call answered is still shown, marked as inferred.
+- **Message ids can find a thread**: the id of a message that started a turn, that a turn replied to, or that a reply span
+  recorded as posted, as well as a trace id.
+- Markdown: a "Message links" table (started by, replies to, who posted the parent, what the turn posted) and dashed
+  possible-parent edges.
+
+### Changed
+- **A parent message that no span names is no longer given to "the latest turn that had finished".** Reading real threads
+  against the relay's own record showed that guess wrong exactly when two agents answered one message together (the ba thread
+  `fb46eb2a…`: turn 3 answers a message turn 1 posted; 0.3.1 said turn 2, flagged `INFERRED`). Now the turns whose reply calls
+  could have created that message are worked out (a call that started before the answering turn, did not fail, did not answer
+  that message, and is not needed for another message, since one call creates one message). One turn left: `INFERRED`, with the
+  reason. Several: `AMBIGUOUS` with `parent_candidates` and **no parent picked**; the `AMBIGUOUS_PARENT` anomaly names them. On the
+  five real ba threads (7 such links), 5 were inferred, all right, and 2 were ambiguous with the right turn among the candidates;
+  none was wrong. Edge `parent_alternatives` stays, as a copy of `parent_candidates`.
+- A turn that replies to the thread's root, or to a message nobody could have posted, is linked by `THREAD_ROOT` (or not at all)
+  rather than inferred.
+- `sessions` lists the newest sessions first, of every project unless one is named (each line names its project).
+- The default request timeout is 30 s (a page can be 1,000 spans).
+- A time without a zone is still read as UTC, whatever the machine's zone; Phoenix's API names the zone of every time.
+
+### Fixed
+- **A thread of more than 100 spans was cut off without a word.** Phoenix's span listing gives 100 by default and a cursor for
+  the rest, and the client read the first page only. It asks for 1,000 and follows `next_cursor`.
+- Phoenix's REST API lists spans newest first, so a turn's tools were listed in reverse order (and tool-loop detection read them
+  backwards). Spans are requested, and sorted, by start time.
+- `sessions` listed the oldest sessions first.
+- A trace's spans that do not carry `session.id` (a steer record, for one) are read with the rest of the trace.
+
 ## [0.3.1] - 2026-11-08
 
 ### Fixed
