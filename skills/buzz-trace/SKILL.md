@@ -37,7 +37,7 @@ Distributed thread observability, AI query engine, and telemetry diagnostic CLI 
 | Inspect specific turn details | `buzz-trace query <thread_id> --turn <N> --tools --compact --json` | ~150 tokens |
 | Filter by specific agent | `buzz-trace query <thread_id> --agent <agent_name> --compact --json` | ~150 tokens |
 | Run automated diagnostics | `buzz-trace analyze <thread_id> --compact --json` | ~180 tokens |
-| Thread cost and who answered whom | `buzz-trace query <thread_id> --compact --json --flat` (`cost_usd`, `parent`, `edge`) | ~250 tokens |
+| Thread cost and who answered whom | `buzz-trace query <thread_id> --compact --json --flat` (`cost_usd`, `parent`, `edge`) | ~200 tokens a turn (861 for a 4-turn thread); add `--last N` |
 | Phoenix with authentication on | `PHOENIX_API_KEY=… buzz-trace query <thread_id> --project <community>` or `--db <copy of phoenix.db>` | same |
 | Full human-readable terminal view | `buzz-trace inspect <thread_id> [--project <community>]` | Terminal UI |
 | Watch live thread execution | `buzz-trace watch <thread_id> [--interval 2.0]` | Interactive |
@@ -209,7 +209,7 @@ buzz-trace context <thread_id> --budget 200 --flat
 
 ---
 
-### 8. Who Answered Whom, and What It Cost (<250 tokens)
+### 8. Who Answered Whom, and What It Cost (~200 tokens a turn)
 
 ```bash
 buzz-trace query <thread_id> --compact --json --flat --project <community>
@@ -233,6 +233,7 @@ Read `turns[].parent` (the turn it continues), `turns[].edge` (present only when
 | "`tokens` is 170k, so the context is nearly full." | `tokens` is summed over the turn's model calls; 3 calls of 57k read as 170k. | Read `ctx`. TOKEN_BLOAT and TOKEN_INFLATION already judge per call. |
 | "`NOT_FOUND`, so the thread never ran." | It only says the places searched had nothing (a stale local copy, a wrong `--project`). | Read `tried`; pass `--db <live copy>` or `--project <community>`. |
 | "No `edge` on a turn, so its parent is a guess." | The opposite: no `edge` is the exact link; `inferred` is the guess. | Check `AMBIGUOUS_PARENT` before relying on an inferred parent. |
+| "I sent 4 messages but see 3 turns, so one was lost." | With steering, a message sent while the agent is still answering is handled by the running turn and starts no trace. | Look for `msgs: 2` in compact output (`steered_event_ids` in `inspect --json`): that turn handled both. |
 | "Two agents answered the same message, so one replied to the other." | They were started by the same message: siblings. | Trust `parent`, not the order of the turns. |
 
 ---

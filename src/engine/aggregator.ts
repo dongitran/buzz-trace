@@ -91,6 +91,7 @@ function resolveParent(
   all: AgentTurn[],
   byTrigger: Map<string, AgentTurn[]>,
   byPosted: Map<string, AgentTurn>,
+  bySteered: Map<string, AgentTurn>,
 ): { parent?: AgentTurn; type: ThreadEdgeType | null; alternatives: AgentTurn[] } {
   const isSiblingOrSelf = (t: AgentTurn) =>
     t === turn || (Boolean(turn.nostrEventId) && t.nostrEventId === turn.nostrEventId);
@@ -106,6 +107,11 @@ function resolveParent(
     const started = (byTrigger.get(replyTo) || []).filter((t) => !isSiblingOrSelf(t));
     if (started.length > 0) {
       return { parent: pickTriggered(started, turn), type: "REPLY_TO", alternatives: [] };
+    }
+    // A message steered into a running turn started no turn, but that turn answered it.
+    const handler = bySteered.get(replyTo);
+    if (handler && !isSiblingOrSelf(handler)) {
+      return { parent: handler, type: "REPLY_TO", alternatives: [] };
     }
   }
 
@@ -170,24 +176,32 @@ function shellCommandOf(attrs: Record<string, unknown>): string | null {
   }
 }
 
+/** What a posting tool call wrote and which message it answered; null when the call posts nothing to the thread. */
+interface PostCall {
+  text: string | null;
+  replyTo: string | null;
+}
+
+const ID_IN_FLAG = /--reply-to\s+(?:"([0-9a-fA-F]{64})"|'([0-9a-fA-F]{64})'|([0-9a-fA-F]{64}))/;
+
 /** A tool that posts to the thread: MCP `…__reply` / `…__send` / `…__post…`, or a shell running `buzz messages send`. */
-function postedTextOf(toolName: string, attrs: Record<string, unknown>): string | null {
+function postOf(toolName: string, attrs: Record<string, unknown>): PostCall | null {
   const base = (toolName.split("__").pop() || toolName).toLowerCase();
   const posts = /^(reply|send|post)(_|$)|^(send|post)_message$/.test(base);
   if (posts) {
-    const direct = attrs["tool.parameters.text"] ?? attrs["tool.parameters.content"] ?? attrs["tool.parameters.message"];
-    if (typeof direct === "string" && direct.trim()) {return direct.trim();}
+    let json: Record<string, unknown> = {};
     const raw = attrs["input.value"];
     if (typeof raw === "string") {
       try {
-        const parsed = JSON.parse(raw) as Record<string, unknown>;
-        const text = parsed.text ?? parsed.content ?? parsed.message;
-        if (typeof text === "string" && text.trim()) {return text.trim();}
+        json = JSON.parse(raw) as Record<string, unknown>;
       } catch {
-        // not JSON: no posted text to read
+        // not JSON: the parameters come from the tool.parameters.* attributes
       }
     }
-    return null;
+    const pick = (...values: unknown[]) => values.find((v) => typeof v === "string" && v.trim()) as string | undefined;
+    const text = pick(attrs["tool.parameters.text"], attrs["tool.parameters.content"], attrs["tool.parameters.message"], json.text, json.content, json.message);
+    const target = pick(attrs["tool.parameters.reply_to"], attrs["tool.parameters.replyTo"], json.reply_to, json.replyTo);
+    return { text: text ? text.trim() : null, replyTo: target && HEX64.test(target.trim()) ? target.trim().toLowerCase() : null };
   }
   const command = shellCommandOf(attrs);
   if (command && /\bbuzz\b[^\n]*\bmessages\s+send\b/.test(command)) {
@@ -195,7 +209,9 @@ function postedTextOf(toolName: string, attrs: Record<string, unknown>): string 
     const m = /--content\s+(?:"((?:[^"\\]|\\.)*)(?:"|$)|'([^']*)(?:'|$))/.exec(command);
     const raw = m ? (m[1] !== undefined ? m[1].replace(/\\(["\\$`])/g, "$1") : m[2]) : null;
     const text = raw ? raw.replace(/…$/, "") : null;
-    return text && text.trim() ? text.trim() : null;
+    const target = ID_IN_FLAG.exec(command);
+    const id = target ? (target[1] ?? target[2] ?? target[3]).toLowerCase() : null;
+    return { text: text && text.trim() ? text.trim() : null, replyTo: id };
   }
   return null;
 }
@@ -237,6 +253,15 @@ export class ThreadAggregator {
     const rawTurns: AgentTurn[] = [];
     for (const [traceId, traceSpans] of tracesMap.entries()) {
       rawTurns.push(this.buildTurn(traceId, traceSpans));
+    }
+
+    // 2a. Messages a turn answered that did not start it (steered into the running turn). The thread's root, the
+    // trigger's parent and the triggers of other turns are answers to messages the thread already had a turn for.
+    const triggers = new Set(rawTurns.map((t) => t.nostrEventId).filter((id): id is string => Boolean(id)));
+    for (const turn of rawTurns) {
+      turn.steeredEventIds = (turn.answeredEventIds ?? []).filter(
+        (id) => id !== turn.nostrEventId && id !== turn.nostrRootId && id !== turn.nostrReplyTo && !triggers.has(id),
+      );
     }
 
     // 2b. Detect INVALID_DURATION (monotonic clock jumps where start_time > end_time)
@@ -416,6 +441,7 @@ export class ThreadAggregator {
     const tools: ToolExecution[] = [];
     const postedTexts: string[] = [];
     const postedEventIds: string[] = [];
+    const answeredEventIds: string[] = [];
     const toolWindows: Array<[number, number]> = [];
 
     for (const span of spans) {
@@ -490,8 +516,13 @@ export class ThreadAggregator {
           toolWindows.push([span.startTime.getTime(), (span.endTime ?? span.startTime).getTime()]);
         }
         if (span.statusCode !== "ERROR") {
-          const postedText = postedTextOf(toolName, attrs);
-          if (postedText) {postedTexts.push(postedText);}
+          const post = postOf(toolName, attrs);
+          if (post?.text) {
+            postedTexts.push(post.text);
+          }
+          if (post?.replyTo && !answeredEventIds.includes(post.replyTo)) {
+            answeredEventIds.push(post.replyTo);
+          }
         }
       }
     }
@@ -518,6 +549,7 @@ export class ThreadAggregator {
       senderName,
       postedTexts,
       postedEventIds,
+      answeredEventIds,
       startTime: turnStart,
       endTime: turnEnd,
       durationMs: turnDuration,
@@ -559,7 +591,11 @@ export class ThreadAggregator {
     // messages they posted (when telemetry records posted event ids).
     const byTrigger = new Map<string, AgentTurn[]>();
     const byPosted = new Map<string, AgentTurn>();
+    const bySteered = new Map<string, AgentTurn>();
     for (const turn of rawTurns) {
+      for (const steered of turn.steeredEventIds || []) {
+        bySteered.set(steered, turn);
+      }
       if (turn.nostrEventId) {
         const list = byTrigger.get(turn.nostrEventId) || [];
         list.push(turn);
@@ -584,7 +620,7 @@ export class ThreadAggregator {
     }
 
     for (const turn of rawTurns) {
-      const { parent, type, alternatives } = resolveParent(turn, rawTurns, byTrigger, byPosted);
+      const { parent, type, alternatives } = resolveParent(turn, rawTurns, byTrigger, byPosted, bySteered);
 
       if (parent && parent !== turn && type) {
         parentMap.set(turn, parent);

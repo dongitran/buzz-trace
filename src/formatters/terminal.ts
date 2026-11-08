@@ -149,6 +149,12 @@ export class TerminalRenderer {
       if (turn.nostrEventId) {
         lines.push(`  ${this.dim("│")}  ${this.bold("Event ID :")} ${turn.nostrEventId}`);
       }
+      if (turn.steeredEventIds && turn.steeredEventIds.length > 0) {
+        const extra = turn.steeredEventIds.length;
+        lines.push(
+          `  ${this.dim("│")}  ${this.bold("Handled  :")} ${extra + 1} messages (${extra} arrived while the turn was running)`,
+        );
+      }
       if (turn.senderName) {
         lines.push(`  ${this.dim("│")}  ${this.bold("From     :")} ${turn.senderName}`);
       }

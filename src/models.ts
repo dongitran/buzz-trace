@@ -153,6 +153,13 @@ export interface AgentTurn {
   postedTexts?: string[];
   /** Event ids of the messages the turn posted, when telemetry records them (`nostr.posted_event_id[s]`). */
   postedEventIds?: string[];
+  /** Event ids the turn's reply calls answered (`reply_to`), in order. */
+  answeredEventIds?: string[];
+  /**
+   * Messages the turn answered that did not start it: with steering, a message that arrives while a turn runs is injected
+   * into it and never starts a trace. Excludes the thread's root, the trigger's parent and other turns' triggers.
+   */
+  steeredEventIds?: string[];
   parentTurnIndex?: number | null;
   /** How the parent was found; null for a root turn. */
   parentEdgeType?: ThreadEdgeType | null;
@@ -239,6 +246,8 @@ export interface ThreadTelemetryJSON {
     root_id?: string | null;
     /** Who wrote the message that started the turn. */
     sender?: string | null;
+    /** Messages that arrived while the turn was running and were answered by it (steering). */
+    steered_event_ids?: string[];
     parent_turn_index?: number | null;
     /** How the parent was found: REPLY_TO (exact), INFERRED, THREAD_ROOT; null for a root turn. */
     parent_edge?: string | null;
@@ -380,6 +389,7 @@ export class ThreadTelemetry {
         reply_to: t.nostrReplyTo ?? null,
         root_id: t.nostrRootId ?? null,
         sender: t.senderName ?? null,
+        ...(t.steeredEventIds && t.steeredEventIds.length > 0 ? { steered_event_ids: t.steeredEventIds } : {}),
         parent_turn_index: t.parentTurnIndex ?? null,
         parent_edge: t.parentEdgeType ?? null,
         ...(t.parentAlternatives && t.parentAlternatives.length > 0
