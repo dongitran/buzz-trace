@@ -5,6 +5,37 @@ All notable changes to `buzz-trace` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-11-08
+
+The Buzz fork now writes `steer` spans and posted ids on the four ba twins, and its authors read 0.4.0 against live threads. Four
+things were wrong or missing in how buzz-trace reads what the fork writes.
+
+### Fixed
+- **The text of a steered message was the whole block the agent was handed** (`[New message — arrived while you were working]
+  [Buzz event: @mention] Event ID: …`). The span's `input.value` is that block; the message is the envelope's `Content:` line.
+  The report, the Markdown and the JSON now show that line (a plain text, as other runtimes may record, is read as before). The
+  id comes from the block when the span has no `nostr.event_id`; the sender is the span's `nostr.sender_name`, else a real name
+  in the block (an npub is not shown as a name), and `nostr.sender_pubkey` goes into the JSON.
+- **"steered messages are not recorded in this trace" was printed for traces whose runtime does record them** and simply had
+  nothing steered. It now appears only for a turn with no sign that its runtime writes the contract: no `steer` record, no
+  recorded posted id (a runtime that writes ids writes steer spans), and no such turn of the same agent in the thread. `steering`
+  in the JSON follows (`recorded` when a steered message would show), and each turn has `steering_recorded`. Traces written
+  before the contract read as they did.
+- **A filtered query lost the thread's steering state**: `--last`, `--turn`, `--agent`, `--failures` and the other filters said
+  `steering: "not_recorded"` for a thread that had recorded steering.
+
+### Added
+- **`steer.delivered`**: false means the turn ended before the message was echoed to it or a result named it. Nothing says that any
+  turn ran such a message (it may run inside a later one, or never), so it is listed as `↳ not delivered …`, is not counted in
+  `Handled N messages`, and a later reply to it is not linked to the turn. In the JSON `steered[]` has `delivered` and
+  `end_reason` (`echo`, `result`, `turn_end`); compact output lists them apart as `not_delivered`.
+- **`steer_spans_capped`**: the runtime stops writing steer spans for a turn after a number of them, and says so with this event.
+  The report, the Markdown and the JSON (`steered_capped`) say that the list is not complete.
+
+### Changed
+- An id that a `steer` record shows was sent to a turn is never looked for among the turns' own reply calls (a message sent to a
+  turn was not created by one), so a reply to it is no longer attributed to an agent by inference.
+
 ## [0.4.0] - 2026-11-08
 
 **Breaking: Phoenix's server is now the only source.** buzz-trace reads Phoenix over its API and nothing else: no relay file, no

@@ -236,7 +236,9 @@ Posted   : id not recorded  "Kent Twin here…"
 
 ### 10. Messages Steered Into a Running Turn
 
-`Handled  : 4 messages (3 steered)` lists each steered message with its id and text (compact: `msgs`, `steered`). They are recorded as `steer` child spans (or span events) with `nostr.event_id`, `input.value`, `nostr.sender_name` and `steer.priority`. `steered messages are not recorded in this trace` (compact: `steering: "not_recorded"`) means the runtime wrote none: a message that arrived while a turn ran is simply absent, so "4 messages sent, 1 turn" is not a lost message. A steered message that a reply call answered still shows, marked `inferred from a reply call; text not recorded`.
+`Handled  : 4 messages (3 steered)` lists each steered message with its id and text (compact: `msgs`, `steered`). They are recorded as `steer` child spans (or span events); the text is the `Content:` line of the block the agent was handed. A line `↳ not delivered …` (compact: `not_delivered`) is a message the turn ended before receiving: it is not counted and not linked to, and nothing says that any turn ran it. `↳ more messages were steered … this list is not complete` means the runtime stopped writing steer spans for that turn.
+
+`steered messages are not recorded in this trace` (compact: `steering: "not_recorded"`) appears only where nothing shows that the runtime writes them: a message that arrived while such a turn ran is simply absent, so "4 messages sent, 1 turn" is not a lost message. A turn whose runtime records posted ids reads plainly `Handled  : 1 message` when nothing was steered. A steered message that a reply call answered still shows in an older trace, marked `inferred from a reply call; text not recorded`.
 
 ### 11. A Thread Was Not Found
 

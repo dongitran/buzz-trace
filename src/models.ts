@@ -175,9 +175,19 @@ export interface ParentMessage {
 /** A message that was injected into a running turn (steered), and how buzz-trace knows of it. */
 export interface SteeredMessage {
   eventId: string | null;
+  /** What the person wrote (the block's `Content:` line), not the framing around it. */
   text: string | null;
+  /** The sender's name, when the record or the block has a real one. */
   sender: string | null;
+  senderPubkey: string | null;
   priority: string | null;
+  /**
+   * `steer.delivered`: false when the turn ended before the message was echoed to it or a result named it. Such a message is
+   * not known to have been handled by that turn, so it is not counted and not linked to. Null where nothing says.
+   */
+  delivered: boolean | null;
+  /** `steer.end_reason`: `echo`, `result` or `turn_end`. */
+  endReason: string | null;
   /** When it was delivered to the turn (epoch milliseconds), if recorded. */
   at: number | null;
   /** `span`/`event`: recorded by the runtime (the contract). `reply_call`: only inferred from a reply call that answered it. */
@@ -238,10 +248,18 @@ export interface AgentTurn {
    * a message other than the one that started the turn. Never holds the opening message.
    */
   steered?: SteeredMessage[];
-  /** The ids of `steered`, where known. Excludes the thread's root, the trigger's parent and other turns' triggers. */
+  /** The ids of the steered messages the turn handled, where known. Excludes the thread's root, the trigger's parent, other turns' triggers and messages that were not delivered. */
   steeredEventIds?: string[];
-  /** The messages the turn handled: the one that started it, plus the steered ones. */
+  /** The messages the turn handled: the one that started it, plus the steered ones that were delivered to it. */
   handledMessages?: number;
+  /** The runtime stopped writing steer spans for this turn after a number of them (`steer_spans_capped`): the list of steered messages is not complete. */
+  steerCapped?: boolean;
+  /**
+   * Whether a steered message would have shown in this turn's trace: it has a `steer` record, or a recorded posted id (a
+   * runtime that writes ids writes steer spans), or another turn of the same agent in the thread has either. False for a trace
+   * written before the contract: there, a steered message that no reply call answered is simply absent.
+   */
+  steeringRecorded?: boolean;
   parentTurnIndex?: number | null;
   /** How the parent was found; null for a root turn, and for an AMBIGUOUS one (see `parentCandidates`). */
   parentEdgeType?: ThreadEdgeType | null;
@@ -294,7 +312,7 @@ export interface ThreadTelemetryJSON {
   source?: string | null;
   /** For a thread that was not found: every place that was looked in, and what each said. */
   tried?: string[];
-  /** `recorded` when any turn has a `steer` span or event; `not_recorded` when none has (a steered message would not show). */
+  /** `recorded` when a steered message would show in the trace (a `steer` record, or a runtime that writes the contract); `not_recorded` when none of the turns shows any sign of that. */
   steering?: "recorded" | "not_recorded";
   total_turns: number;
   total_tokens: number;
@@ -342,12 +360,20 @@ export interface ThreadTelemetryJSON {
       event_id: string | null;
       text: string | null;
       sender: string | null;
+      sender_pubkey?: string | null;
       priority: string | null;
       at: string | null;
       source: string;
+      /** False: the turn ended before the message reached it (not counted in `handled_messages`). Absent when nothing says. */
+      delivered?: boolean;
+      end_reason?: string;
     }>;
-    /** Messages the turn handled: the one that started it plus the steered ones. */
+    /** Messages the turn handled: the one that started it plus the steered ones that were delivered. */
     handled_messages?: number;
+    /** True when the list of steered messages is cut short (the runtime caps the steer spans of a turn). */
+    steered_capped?: boolean;
+    /** Whether a steered message would have shown in this turn's trace (see AgentTurn.steeringRecorded). */
+    steering_recorded?: boolean;
     /** The ids of the messages the turn posted, as far as the spans record them (see `posts`). */
     posted_event_ids?: string[];
     /** Each posting call: the message it created (null when not recorded), the one it answered, its text and time. */
@@ -424,7 +450,7 @@ export class ThreadTelemetry {
   anomalies: Anomaly[];
   /** Where the telemetry was read from (the Phoenix endpoint); null when nothing was found. */
   source: string | null;
-  /** Whether any turn of the thread has a `steer` span or event: when false, a steered message would not show in the trace. */
+  /** Whether a steered message would show in this thread's trace: some turn has a `steer` record or shows that its runtime writes the contract. When false, one that arrived mid-turn is simply absent. */
   steeringRecorded: boolean;
   /** Every place that was looked in for the thread, and what each said (kept for a NOT_FOUND). */
   sourcesTried: string[];
@@ -511,13 +537,18 @@ export class ThreadTelemetry {
                 event_id: m.eventId,
                 text: m.text,
                 sender: m.sender,
+                ...(m.senderPubkey ? { sender_pubkey: m.senderPubkey } : {}),
                 priority: m.priority,
                 at: m.at === null ? null : new Date(m.at).toISOString(),
                 source: m.source,
+                ...(m.delivered === null ? {} : { delivered: m.delivered }),
+                ...(m.endReason ? { end_reason: m.endReason } : {}),
               })),
             }
           : {}),
         handled_messages: t.handledMessages ?? 1,
+        ...(t.steerCapped ? { steered_capped: true } : {}),
+        steering_recorded: t.steeringRecorded ?? false,
         posted_event_ids: t.postedEventIds ?? [],
         posts: (t.posts ?? []).map((p) => ({
           event_id: p.eventId,

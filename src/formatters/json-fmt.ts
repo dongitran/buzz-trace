@@ -13,6 +13,14 @@ export interface JsonRenderOptions {
   config?: Config;
 }
 
+/** A steered message in compact output: the first 8 hex of its id and the start of its text. */
+function compactSteer(m: { eventId: string | null; text: string | null }): { id: string | null; text?: string } {
+  return {
+    id: m.eventId ? m.eventId.slice(0, 8) : null,
+    ...(m.text ? { text: m.text.length > 80 ? m.text.slice(0, 80) : m.text } : {}),
+  };
+}
+
 export class JsonRenderer {
   readonly indent: number;
 
@@ -82,15 +90,17 @@ export class JsonRenderer {
             ...(t.parentMessage ? { parent_msg: t.parentMessage.id.slice(0, 8) } : {}),
             ...(t.postedEventIds && t.postedEventIds.length > 0 ? { posted_ids: t.postedEventIds.map((id) => id.slice(0, 8)) } : {}),
             // With steering a message that arrives mid-turn is injected into the running turn: how many it handled, and which.
-            ...(t.steered && t.steered.length > 0
+            // A message the turn ended before receiving is listed apart, and is not one it handled.
+            ...(t.steered && t.steered.some((m) => m.delivered !== false)
               ? {
                   msgs: t.handledMessages ?? 1 + t.steered.length,
-                  steered: t.steered.map((m) => ({
-                    id: m.eventId ? m.eventId.slice(0, 8) : null,
-                    ...(m.text ? { text: m.text.length > 80 ? m.text.slice(0, 80) : m.text } : {}),
-                  })),
+                  steered: t.steered.filter((m) => m.delivered !== false).map(compactSteer),
                 }
               : {}),
+            ...(t.steered && t.steered.some((m) => m.delivered === false)
+              ? { not_delivered: t.steered.filter((m) => m.delivered === false).map(compactSteer) }
+              : {}),
+            ...(t.steerCapped ? { steered_capped: true } : {}),
             status: t.statusCode,
             dur_s: Number((t.durationMs / 1000).toFixed(1)),
             tokens: t.totalTokens,
