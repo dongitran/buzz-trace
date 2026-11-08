@@ -154,6 +154,48 @@ describe("anomalies judged on the context of one call", () => {
     expect(growth[0].message).toMatch(/23,059.*72,291/);
   });
 
+  describe("what the growth is made of", () => {
+    // Per round the spans show: the turn's completion tokens, its tool results (bytes / ~3.5 per token) and the next
+    // message (its envelope). What grows beyond that is sent again with every prompt.
+    const withParts = (turn: ReturnType<typeof turnOf>, o: { toolBytes?: number; inputTokens?: number; completion?: number }) => ({
+      ...turn,
+      completionTokens: o.completion ?? 300,
+      inputTextTokens: o.inputTokens ?? 0,
+      tools: o.toolBytes ? [{ name: "knowledge_search", statusCode: "OK", durationMs: 600, error: null, inputSummary: "", outputBytes: o.toolBytes, spanId: "s" }] : [],
+    });
+
+    it("says what is re-sent when the spans explain only a small part of each round's growth", () => {
+      // Paul in thread A: +16k a round, while his replies, tool results and the new messages are about 1.5k.
+      const parts = { toolBytes: 1700, inputTokens: 300, completion: 720 };
+      const t = of(
+        withParts(turnOf(1, "paul", 69177, 3), parts),
+        withParts(turnOf(2, "paul", 120412, 3), parts),
+        withParts(turnOf(3, "paul", 170112, 3), parts),
+        withParts(turnOf(4, "paul", 144581, 2), parts),
+      );
+      const growth = new AnomalyDetector().analyze(t).find((a) => a.type === "CONTEXT_GROWTH")!;
+      expect(growth.details?.explainedPerRound).toBeGreaterThan(1000);
+      expect(growth.details?.explainedPerRound).toBeLessThan(2500);
+      expect(growth.details?.unexplainedPerRound).toBeGreaterThan(13000);
+      expect(growth.message).toMatch(/re-sent with every prompt/);
+      expect(growth.message).toMatch(/visible in the spans/);
+    });
+
+    it("does not claim anything is re-sent when tool results account for the growth", () => {
+      // 60 KB of tool output a round is ~17k tokens: the conversation itself is growing.
+      const parts = { toolBytes: 60000, inputTokens: 300 };
+      const t = of(
+        withParts(turnOf(1, "paul", 69000, 3), parts),
+        withParts(turnOf(2, "paul", 120000, 3), parts),
+        withParts(turnOf(3, "paul", 170000, 3), parts),
+      );
+      const growth = new AnomalyDetector().analyze(t).find((a) => a.type === "CONTEXT_GROWTH")!;
+      expect(growth.details?.unexplainedPerRound).toBeLessThan(3000);
+      expect(growth.message).not.toMatch(/re-sent/);
+      expect(growth.message).toMatch(/replies, tool results and new messages account for/i);
+    });
+  });
+
   it("raises growth to a WARNING once the context per call is large", () => {
     const t = of(turnOf(1, "paul", 69000, 3), turnOf(2, "paul", 160000, 3), turnOf(3, "paul", 280000, 3), turnOf(4, "paul", 330000, 3));
     const growth = new AnomalyDetector().analyze(t).find((a) => a.type === "CONTEXT_GROWTH");

@@ -268,14 +268,27 @@ export class AnomalyDetector {
       if (lastContext / firstContext >= this.contextGrowthMultiplier && delta >= this.contextGrowthMinDelta) {
         const rounds = turns.length - 1;
         const perRound = Math.round(delta / rounds);
+        // What a round adds that the spans show: the turn's own output, its tool results (~3.5 bytes a token) and the
+        // next message. The rest of the growth is not in any span: it is sent again with each prompt.
+        let visible = 0;
+        for (let i = 0; i < rounds; i++) {
+          const toolBytes = turns[i].tools.reduce((acc, tool) => acc + (tool.outputBytes || 0), 0);
+          visible += turns[i].completionTokens + Math.round(toolBytes / 3.5) + (turns[i + 1].inputTextTokens ?? 0);
+        }
+        const explainedPerRound = Math.round(visible / rounds);
+        const unexplainedPerRound = Math.max(0, perRound - explainedPerRound);
+        const resent = unexplainedPerRound >= 5000 && unexplainedPerRound >= perRound / 2;
         anomalies.push({
           type: "CONTEXT_GROWTH",
           // Growth is a cost observation, not a failure (--failures lists WARNINGs): it warns only once the context is large.
           severity: lastContext >= this.tokenBloatThreshold / 2 ? "WARNING" : "INFO",
           message:
             `Context per model call of ${agent} grew from ~${firstContext.toLocaleString()} (Turn ${first.turnIndex}) to ` +
-            `~${lastContext.toLocaleString()} (Turn ${last.turnIndex}), about +${perRound.toLocaleString()} a round: ` +
-            "each round's history is re-sent, so check whether every prompt repeats a large static block.",
+            `~${lastContext.toLocaleString()} (Turn ${last.turnIndex}), about +${perRound.toLocaleString()} a round. ` +
+            (resent
+              ? `Only ~${explainedPerRound.toLocaleString()} a round is visible in the spans (replies, tool results, new messages): ` +
+                `~${unexplainedPerRound.toLocaleString()} a round is re-sent with every prompt, so check whether each prompt repeats a large static block.`
+              : `Replies, tool results and new messages account for ~${explainedPerRound.toLocaleString()} a round: the conversation itself is growing.`),
           turnIndex: last.turnIndex,
           traceId: last.traceId,
           details: {
@@ -285,6 +298,8 @@ export class AnomalyDetector {
             firstContext,
             lastContext,
             perRound,
+            explainedPerRound,
+            unexplainedPerRound,
             turns: turns.length,
           },
         });

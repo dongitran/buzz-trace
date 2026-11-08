@@ -6,6 +6,7 @@
 import {
   AgentTurn,
   Anomaly,
+  PostRecord,
   SpanNode,
   ThreadBranch,
   ThreadDAG,
@@ -16,6 +17,8 @@ import {
 } from "../models.js";
 import { extractSemanticToolInput } from "../formatters/compact-fmt.js";
 import { type BuzzEnvelope, parseBuzzEnvelope } from "./envelope.js";
+import { linkPostedMessages, type ThreadMessage } from "./messages.js";
+import { countTokens } from "../tokenizer.js";
 
 const PREVIEW_CHARS = 120;
 /** A child that starts this soon after its candidate parent ended still counts as after it (container clock drift). */
@@ -229,7 +232,7 @@ export class ThreadAggregator {
     this.phoenixUiUrl = phoenixUiUrl;
   }
 
-  aggregate(spans: SpanNode[]): ThreadTelemetry {
+  aggregate(spans: SpanNode[], options: { messages?: ThreadMessage[] } = {}): ThreadTelemetry {
     if (!spans || spans.length === 0) {
       return new ThreadTelemetry({
         threadId: this.threadId,
@@ -254,6 +257,10 @@ export class ThreadAggregator {
     for (const [traceId, traceSpans] of tracesMap.entries()) {
       rawTurns.push(this.buildTurn(traceId, traceSpans));
     }
+
+    // 2-. The relay's messages, when given: match each reply call with the message it created, so the event ids of what
+    // every turn posted are known and the links between turns are exact.
+    const relayMessages = options.messages ? { read: options.messages.length, linked: linkPostedMessages(rawTurns, options.messages) } : null;
 
     // 2a. Messages a turn answered that did not start it (steered into the running turn). The thread's root, the
     // trigger's parent and the triggers of other turns are answers to messages the thread already had a turn for.
@@ -342,6 +349,7 @@ export class ThreadAggregator {
       dag,
       turns,
       anomalies: orderingAnomalies,
+      relayMessages,
     });
   }
 
@@ -442,6 +450,7 @@ export class ThreadAggregator {
     const postedTexts: string[] = [];
     const postedEventIds: string[] = [];
     const answeredEventIds: string[] = [];
+    const posts: PostRecord[] = [];
     const toolWindows: Array<[number, number]> = [];
 
     for (const span of spans) {
@@ -523,6 +532,14 @@ export class ThreadAggregator {
           if (post?.replyTo && !answeredEventIds.includes(post.replyTo)) {
             answeredEventIds.push(post.replyTo);
           }
+          if (post && span.startTime) {
+            posts.push({
+              start: span.startTime.getTime(),
+              end: (span.endTime ?? span.startTime).getTime(),
+              text: post.text,
+              replyTo: post.replyTo,
+            });
+          }
         }
       }
     }
@@ -550,6 +567,7 @@ export class ThreadAggregator {
       postedTexts,
       postedEventIds,
       answeredEventIds,
+      posts,
       startTime: turnStart,
       endTime: turnEnd,
       durationMs: turnDuration,
@@ -559,6 +577,7 @@ export class ThreadAggregator {
       totalTokens,
       modelCalls,
       contextPerCall: promptTokens > 0 ? Math.round(promptTokens / modelCalls) : undefined,
+      inputTextTokens: typeof rootSpan?.attributes["input.value"] === "string" ? countTokens(rootSpan.attributes["input.value"] as string) : 0,
       cacheReadTokens,
       cacheWriteTokens,
       costUsd: rootCost ?? (sawLlmCost ? llmCost : undefined),
@@ -750,7 +769,7 @@ export class ThreadAggregator {
             message:
               `Turn ${turn.turnIndex} (${turn.agentName}) answers a message no turn is known to have posted; its parent ` +
               `was inferred as Turn ${parent.turnIndex} (${parent.agentName}), but ${others} finished at about the same ` +
-              "time. Telemetry that records posted event ids (nostr.posted_event_id) makes this exact.",
+              "time. Pass the relay's thread with --messages (or record nostr.posted_event_id in the spans) to make this exact.",
             turnIndex: turn.turnIndex,
             traceId: turn.traceId,
             details: { inferredParent: parent.turnIndex, alternatives: turn.parentAlternatives },
