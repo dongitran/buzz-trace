@@ -70,6 +70,22 @@ describe("what the docs and the code say about sources", () => {
     expect(readme).not.toMatch(/--messages|--db|sqlite|phoenix\.db|PHOENIX_DB_PATH/i);
   });
 
+  it("README and SKILL.md say how an old trace is completed with span annotations, and that buzz-trace only reads them", () => {
+    for (const file of ["README.md", "skills/buzz-trace/SKILL.md"]) {
+      const text = read(file);
+      for (const part of ["POST /v1/span_annotations", "nostr.posted_event_id", "annotator_kind", '"CODE"', "result", "label", "identifier", "span annotation", "never writes"]) {
+        expect(text, `${file} mentions ${part}`).toContain(part);
+      }
+    }
+  });
+
+  it("the CHANGELOG describes, under 0.4.2, the reading of span annotations", () => {
+    const changelog = read("CHANGELOG.md");
+    const start = changelog.indexOf("## [0.4.2]");
+    expect(start).toBeGreaterThan(-1);
+    expect(changelog.slice(start, changelog.indexOf("## [", start + 5))).toContain("span annotation");
+  });
+
   it("no source file reads a database or a relay: Phoenix's server is the only source", () => {
     const walk = (dir: string): string[] =>
       fs.readdirSync(path.join(root, dir), { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(path.join(dir, e.name)) : [path.join(dir, e.name)]));

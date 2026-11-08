@@ -15,8 +15,8 @@ Distributed thread observability, AI query engine, and telemetry diagnostic CLI 
 2. **Causality DAG Over Clock Skew**:
    - Distributed containers (across WSL2, NUC, cloud VMs) have millisecond clock drifts.
    - Always trust `reply_to` causality edges over raw timestamps for turn sequencing and thread DAG topology.
-   - Edges have four strengths. No `edge` field in compact output means an exact link: the parent message started a turn, was taken into one, or a reply span recorded its id. `"edge":"inferred"` means the parent message is recorded nowhere but exactly one turn could have posted it. `"edge":"ambiguous"` means several could have: there is **no `parent`**, and `candidates` lists them. `"edge":"thread_root"` means only the thread's root ties the turn to a turn. Agents started by one message are siblings, never parent and child.
-   - Phoenix does not hold the id of a message an agent posted unless its runtime records it (`nostr.posted_event_id`). Never treat an `inferred` edge as recorded, and never pick one of `candidates` yourself.
+   - Edges have four strengths. No `edge` field in compact output means an exact link: the parent message started a turn, was taken into one, or a reply span recorded its id (an attribute, or a span annotation written afterwards: compact `parent_basis: "annotation"`). `"edge":"inferred"` means the parent message is recorded nowhere but exactly one turn could have posted it. `"edge":"ambiguous"` means several could have: there is **no `parent`**, and `candidates` lists them. `"edge":"thread_root"` means only the thread's root ties the turn to a turn. Agents started by one message are siblings, never parent and child.
+   - Phoenix does not hold the id of a message an agent posted unless its runtime records it (`nostr.posted_event_id`) or someone wrote it as a span annotation of that name. Never treat an `inferred` edge as recorded, and never pick one of `candidates` yourself.
 3. **Tokens Are Summed Over Model Calls**:
    - A turn's `tokens` add up every model call of the turn, and each tool step is one more call that re-reads the whole context. `calls` and `ctx` (shown when a turn made more than one call) give the estimated context of ONE call. Judge context size with `ctx`, never with `tokens`.
    - `CONTEXT_GROWTH` means an agent's context per call keeps growing round after round in a thread session: look for a static block repeated in every prompt.
@@ -219,7 +219,7 @@ buzz-trace context <thread_id> --budget 200 --flat
 buzz-trace query <thread_id> --compact --json --flat
 ```
 
-Read `turns[].parent` (the turn it continues), `turns[].edge` (present only when the link is not exact), `turns[].candidates` (the turns that could have posted the parent message, when there is no `parent`), `cost_usd` (the thread, USD) and `turns[].ctx`. For one turn's full links use `inspect --json`: `event_id`, `reply_to` (the parent message), `parent_message` (`{ id, basis, posted_by_turn, turns }`), `parent_edge`, `posts` (what the turn wrote to the thread: `event_id` when recorded, `reply_to`, `text`), `posted_event_ids`, and `tokens.cache_read`. Message ids in compact output are their first 8 hex (`parent_msg`, `posted_ids`); `inspect --json` has them whole.
+Read `turns[].parent` (the turn it continues), `turns[].edge` (present only when the link is not exact), `turns[].candidates` (the turns that could have posted the parent message, when there is no `parent`), `cost_usd` (the thread, USD) and `turns[].ctx`. For one turn's full links use `inspect --json`: `event_id`, `reply_to` (the parent message), `parent_message` (`{ id, basis, posted_by_turn, turns }`; `basis` `annotation` is an exact link whose posted id came from a span annotation), `parent_edge`, `posts` (what the turn wrote to the thread: `event_id` when recorded, `event_id_source: "annotation"` when it came from an annotation, `reply_to`, `text`), `posted_event_ids`, and `tokens.cache_read`. Message ids in compact output are their first 8 hex (`parent_msg`, `posted_ids`); `inspect --json` has them whole.
 
 ### 9. Which Turn Posted This Message?
 
@@ -231,8 +231,23 @@ Posted   : id not recorded  "Kent Twin here…"
 ```
 
 - `posted by Turn 1 (…)` with no qualifier: the reply span recorded the id. Exact.
+- `posted by Turn 1 (…) — id from a span annotation` (and `Posted : 212193a2… (span annotation)`): the runtime did not record the id, but someone wrote it into Phoenix afterwards. Still exact. It says nothing about steering: such a trace still reads `steered messages are not recorded in this trace`.
 - `— inferred: the only turn that could have posted it`: a deduction, not a record (it assumes an agent wrote the message, not a person).
-- `Turn 1 or Turn 2: not recorded`: report both. Do not choose. To make it exact, the agent's runtime must write `nostr.posted_event_id` (64 hex) on the reply tool span, or return `event_id <hex>` in the tool's output.
+- `Turn 1 or Turn 2: not recorded`: report both. Do not choose. To make it exact, the agent's runtime must write `nostr.posted_event_id` (64 hex) on the reply tool span, or return `event_id <hex>` in the tool's output. An old trace can be completed afterwards (below).
+
+**Completing an old trace.** Whoever knows the ids (say, an operator who read them from the relay) writes one span annotation per reply span, named like the attribute. buzz-trace reads them (one request per 50 reply spans that record no id) and **never writes one**:
+
+```jsonc
+// POST /v1/span_annotations
+{ "data": [ { "span_id": "bcf49f14a6f8f402",           // the reply span (16 hex)
+              "name": "nostr.posted_event_id",
+              "annotator_kind": "CODE",
+              "identifier": "relay-backfill-v1",       // the same identifier again updates it
+              "result": { "label": "<the 64-hex id of the message the call posted>", "explanation": "why you know it" },
+              "metadata": { "source": "relay-backfill" } } ] }
+```
+
+The attribute wins over the annotation, and the annotation over `event_id <hex>` in the output text. Of several annotations on one span the latest counts; if its label is not a 64-hex id the span has none from annotations (an older one was replaced). A Phoenix without the route is read as having none.
 
 ### 10. Messages Steered Into a Running Turn
 
@@ -259,6 +274,7 @@ Posted   : id not recorded  "Kent Twin here…"
 | "`edge: inferred`, so the thread is unreliable." | It is only a link Phoenix cannot prove: no span records the id of the message the turn replies to. | Treat it as a deduction. The agent's runtime must record `nostr.posted_event_id` to make it exact. |
 | "`edge: ambiguous` has no parent, so the turn is unrelated." | Several turns could have posted the parent message and buzz-trace will not pick one. | Use `candidates`; do not choose between them. |
 | "No `edge` on a turn, so its parent is a guess." | The opposite: no `edge` is the exact link; `inferred` is the guess. | Check `candidates` and `edge` before relying on a parent. |
+| "`Posted : … (span annotation)`, so the id is a guess." | It is an id someone wrote into Phoenix for that reply span; buzz-trace takes it exactly, and the link it gives is exact. It does not show that the runtime records steered messages. | Treat the link as exact and say where the id came from (`basis: "annotation"`). |
 | "`Posted : id not recorded`, so the message was not posted." | The text and time of the reply call are in Phoenix; only the id of the message it created is not, unless the runtime records it. | Read the text of the post; the id needs `nostr.posted_event_id`. |
 | "I sent 4 messages but see 3 turns, so one was lost." | With steering, a message sent while the agent is still answering is handled by the running turn and starts no trace. | Look for `Handled : N messages (K steered)` / `msgs` in compact output. If the report says steered messages are not recorded, the trace cannot show them. |
 | "Two agents answered the same message, so one replied to the other." | They were started by the same message: siblings. | Trust `parent`, not the order of the turns. |

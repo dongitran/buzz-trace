@@ -5,9 +5,15 @@
  * traces (some spans, a steer record for one, need not carry it). When the project is not named it is found first from the
  * session (`GET /v1/sessions/{id}` names the project that holds it), which is two more. Pages are read to the end (the
  * cursor), newest-last (`sort=start_time&order=asc`), so nothing is cut off and tools are listed in the order they ran.
+ *
+ * One more request per 50 reply calls whose spans record no posted id: the `nostr.posted_event_id` span annotations Phoenix may
+ * hold for them (`GET /v1/projects/{project}/span_annotations`, `span_ids` repeated). None is made when there is no such call.
+ * buzz-trace only ever reads; it makes no request but GET.
  */
 
-import { SpanNode, SpanNodeData } from "../models.js";
+import { POSTED_EVENT_ID_ANNOTATION } from "../contract.js";
+import { wantsPostedId } from "../engine/aggregator.js";
+import { type SpanAnnotation, SpanNode, SpanNodeData } from "../models.js";
 import { PhoenixAPIError } from "./errors.js";
 import { PhoenixAuth, type PhoenixCredentials } from "./phoenix-auth.js";
 
@@ -50,10 +56,27 @@ export interface LocatedThread {
 
 type Params = Record<string, string | number | boolean | null | undefined | Array<string | number>>;
 
+/** A span annotation as Phoenix's REST API returns it: only what is read. */
+interface RestSpanAnnotation {
+  span_id?: string;
+  name?: string;
+  result?: { label?: string | null } | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+/** Epoch milliseconds of a timestamp Phoenix wrote, or null. */
+function timeOf(value: unknown): number | null {
+  const ms = typeof value === "string" && value ? Date.parse(value) : Number.NaN;
+  return Number.isNaN(ms) ? null : ms;
+}
+
 /** The biggest page Phoenix gives. */
 const PAGE = 1000;
 /** Trace ids per request: the URL stays short. */
 const TRACE_CHUNK = 50;
+/** Span ids per request for annotations: the same. */
+const ANNOTATION_CHUNK = 50;
 /** A guard against a cursor that never ends. */
 const MAX_PAGES = 500;
 const SPAN_ORDER = { limit: PAGE, sort: "start_time", order: "asc" } as const;
@@ -260,6 +283,50 @@ export class PhoenixClient {
     return this.getSpansByTraceIds(project, [traceId]);
   }
 
+  /**
+   * The annotations named `name` on spans of a project, a batch of spans per request (`span_ids` repeated: Phoenix does not
+   * split a comma-joined list), the cursor followed. A batch Phoenix answers 404 for (it has no such route, or none of the
+   * spans) has none; any other failure is a failure.
+   */
+  async getSpanAnnotations(project: string, spanIds: string[], name: string = POSTED_EVENT_ID_ANNOTATION): Promise<Array<{ spanId: string; annotation: SpanAnnotation }>> {
+    const found: Array<{ spanId: string; annotation: SpanAnnotation }> = [];
+    for (let i = 0; i < spanIds.length; i += ANNOTATION_CHUNK) {
+      let rows: RestSpanAnnotation[];
+      try {
+        rows = await this.pages<RestSpanAnnotation>(`/v1/projects/${encodeURIComponent(project)}/span_annotations`, {
+          span_ids: spanIds.slice(i, i + ANNOTATION_CHUNK),
+          include_annotation_names: name,
+          limit: PAGE,
+        });
+      } catch (err) {
+        if (err instanceof PhoenixAPIError && err.statusCode === 404) {
+          continue;
+        }
+        throw err;
+      }
+      for (const row of rows) {
+        if (typeof row.span_id === "string" && typeof row.name === "string") {
+          found.push({
+            spanId: row.span_id,
+            annotation: { name: row.name, label: typeof row.result?.label === "string" ? row.result.label : null, at: timeOf(row.updated_at) ?? timeOf(row.created_at) },
+          });
+        }
+      }
+    }
+    return found;
+  }
+
+  /** Puts on every reply span that records no posted id the `nostr.posted_event_id` annotations Phoenix holds for it. */
+  private async attachPostedIdAnnotations(project: string, spans: SpanNode[]): Promise<void> {
+    const wanted = new Map(spans.filter(wantsPostedId).map((span) => [span.spanId, span]));
+    if (wanted.size === 0) {
+      return;
+    }
+    for (const { spanId, annotation } of await this.getSpanAnnotations(project, [...wanted.keys()])) {
+      wanted.get(spanId)?.annotations.push(annotation);
+    }
+  }
+
   /** Every span of the traces `spans` belong to: the spans found by a filter, completed with their siblings. */
   private async completeTraces(project: string, spans: SpanNode[]): Promise<SpanNode[]> {
     const traceIds = [...new Set(spans.map((s) => s.traceId).filter(Boolean))];
@@ -332,6 +399,7 @@ export class PhoenixClient {
         throw err;
       }
       if (spans.length > 0) {
+        await this.attachPostedIdAnnotations(name, spans);
         return { project: name, spans, searched };
       }
     }

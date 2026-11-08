@@ -54,6 +54,8 @@ export function describeParent(turn: AgentTurn, turns: AgentTurn[]): string | nu
   switch (parent.basis) {
     case "posted":
       return `${id} posted by ${turnName(parent.postedByTurn ?? parent.turns[0], byIndex)}`;
+    case "annotation":
+      return `${id} posted by ${turnName(parent.postedByTurn ?? parent.turns[0], byIndex)} — id from a span annotation`;
     case "started":
       return parent.turns.length === 1
         ? `${id} started ${turnName(parent.turns[0], byIndex)}`
@@ -80,6 +82,8 @@ export function describePoster(turn: AgentTurn): string {
   switch (parent.basis) {
     case "posted":
       return `Turn ${parent.postedByTurn ?? parent.turns[0]}`;
+    case "annotation":
+      return `Turn ${parent.postedByTurn ?? parent.turns[0]} (annotation)`;
     case "inferred":
       return `Turn ${parent.postedByTurn ?? parent.turns[0]} (inferred)`;
     case "ambiguous":

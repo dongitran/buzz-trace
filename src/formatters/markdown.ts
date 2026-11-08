@@ -117,7 +117,7 @@ export class MarkdownRenderer {
       lines.push("| Turn | Agent | Handled | Started by | Replies to | Parent posted by | Posted |");
       lines.push("| :--- | :--- | :--- | :--- | :--- | :--- | :--- |");
       for (const turn of t.turns) {
-        const ids = (turn.posts ?? []).map((p) => (p.eventId ? `\`${shortId(p.eventId)}\`` : ID_NOT_RECORDED));
+        const ids = (turn.posts ?? []).map((p) => (p.eventId ? `\`${shortId(p.eventId)}\`${p.eventIdSource === "annotation" ? " (annotation)" : ""}` : ID_NOT_RECORDED));
         const unplaced = (turn.postedEventIds ?? []).filter((id) => !(turn.posts ?? []).some((p) => p.eventId === id)).map((id) => `\`${shortId(id)}\``);
         const posted = [...ids, ...unplaced].join(", ") || ID_NOT_RECORDED;
         lines.push(

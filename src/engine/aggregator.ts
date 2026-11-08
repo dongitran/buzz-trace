@@ -8,6 +8,8 @@ import {
   Anomaly,
   type ParentBasis,
   PostRecord,
+  type PostedIdSource,
+  type SpanAnnotation,
   SpanNode,
   SteeredMessage,
   ThreadBranch,
@@ -21,6 +23,7 @@ import {
   POSTED_EVENT_ID_ATTR,
   POSTED_EVENT_IDS_ATTR,
   POSTED_OUTPUT_ATTRS,
+  postedIdFromAnnotations,
   postedIdFromOutput,
   STEER_BLOCK_HEADER,
   STEER_CAPPED_EVENT_NAME,
@@ -101,19 +104,32 @@ function postedIdsOf(attrs: Record<string, unknown>): string[] {
   return [...hexIds(attrs[POSTED_EVENT_ID_ATTR]), ...hexIds(attrs[POSTED_EVENT_IDS_ATTR])];
 }
 
-/** The id of the one message a posting call created: the attribute, else `event_id <hex>` in what the tool returned. */
-function createdIdOf(attrs: Record<string, unknown>): string | null {
+/** The id of the one message a posting call created, and where it was read. */
+interface CreatedId {
+  id: string;
+  source: PostedIdSource;
+}
+
+/**
+ * The id of the one message a posting call created: the attribute; else the span's annotation (`annotated`, already read from
+ * the span's `nostr.posted_event_id` annotations); else `event_id <hex>` in what the tool returned. An attribute that names
+ * several messages decides: the call is not taken for one of them, and no other source is asked.
+ */
+function createdIdOf(attrs: Record<string, unknown>, annotated: string | null): CreatedId | null {
   const recorded = postedIdsOf(attrs);
   if (recorded.length === 1) {
-    return recorded[0];
+    return { id: recorded[0], source: "attribute" };
   }
   if (recorded.length > 1) {
     return null;
   }
+  if (annotated) {
+    return { id: annotated, source: "annotation" };
+  }
   for (const name of POSTED_OUTPUT_ATTRS) {
     const id = postedIdFromOutput(attrs[name]);
     if (id) {
-      return id;
+      return { id, source: "output" };
     }
   }
   return null;
@@ -247,7 +263,8 @@ function resolveParent(turn: AgentTurn, idx: ParentIndexes): ParentResolution {
   if (replyTo) {
     const poster = idx.byPosted.get(replyTo);
     if (poster && !isSiblingOrSelf(poster)) {
-      return { parent: poster, type: "REPLY_TO", basis: "posted", turns: [poster], postedBy: poster };
+      const basis = (poster.annotatedEventIds ?? []).includes(replyTo) ? "annotation" : "posted";
+      return { parent: poster, type: "REPLY_TO", basis, turns: [poster], postedBy: poster };
     }
     const started = (idx.byTrigger.get(replyTo) || []).filter((t) => !isSiblingOrSelf(t));
     if (started.length > 0) {
@@ -315,12 +332,17 @@ interface PostCall {
   text: string | null;
   replyTo: string | null;
   eventId: string | null;
+  /** Where `eventId` was read; null when there is none. */
+  eventIdSource: PostedIdSource | null;
 }
 
 const ID_IN_FLAG = /--reply-to\s+(?:"([0-9a-fA-F]{64})"|'([0-9a-fA-F]{64})'|([0-9a-fA-F]{64}))/;
 
-/** A tool that posts to the thread: MCP `…__reply` / `…__send` / `…__post…`, or a shell running `buzz messages send`. */
-function postOf(toolName: string, attrs: Record<string, unknown>): PostCall | null {
+/**
+ * A tool that posts to the thread: MCP `…__reply` / `…__send` / `…__post…`, or a shell running `buzz messages send`.
+ * `annotations` are those on the tool's span: one of them may give the id of the message the call created (see createdIdOf).
+ */
+function postOf(toolName: string, attrs: Record<string, unknown>, annotations?: readonly SpanAnnotation[]): PostCall | null {
   const base = (toolName.split("__").pop() || toolName).toLowerCase();
   const posts = /^(reply|send|post)(_|$)|^(send|post)_message$/.test(base);
   if (posts) {
@@ -336,10 +358,12 @@ function postOf(toolName: string, attrs: Record<string, unknown>): PostCall | nu
     const pick = (...values: unknown[]) => values.find((v) => typeof v === "string" && v.trim()) as string | undefined;
     const text = pick(attrs["tool.parameters.text"], attrs["tool.parameters.content"], attrs["tool.parameters.message"], json.text, json.content, json.message);
     const target = pick(attrs["tool.parameters.reply_to"], attrs["tool.parameters.replyTo"], json.reply_to, json.replyTo);
+    const created = createdIdOf(attrs, postedIdFromAnnotations(annotations));
     return {
       text: text ? text.trim() : null,
       replyTo: target && HEX64.test(target.trim()) ? target.trim().toLowerCase() : null,
-      eventId: createdIdOf(attrs),
+      eventId: created?.id ?? null,
+      eventIdSource: created?.source ?? null,
     };
   }
   const command = shellCommandOf(attrs);
@@ -350,9 +374,29 @@ function postOf(toolName: string, attrs: Record<string, unknown>): PostCall | nu
     const text = raw ? raw.replace(/…$/, "") : null;
     const target = ID_IN_FLAG.exec(command);
     const id = target ? (target[1] ?? target[2] ?? target[3]).toLowerCase() : null;
-    return { text: text && text.trim() ? text.trim() : null, replyTo: id, eventId: createdIdOf(attrs) };
+    const created = createdIdOf(attrs, postedIdFromAnnotations(annotations));
+    return { text: text && text.trim() ? text.trim() : null, replyTo: id, eventId: created?.id ?? null, eventIdSource: created?.source ?? null };
   }
   return null;
+}
+
+/** A span of a tool call: named `tool:…`, or a tool/internal span that carries `tool.name`. */
+function isToolCall(span: SpanNode): boolean {
+  return span.name.startsWith("tool:") || ((span.spanKind === "TOOL" || span.spanKind === "SPAN_KIND_INTERNAL") && "tool.name" in span.attributes);
+}
+
+const toolNameOf = (span: SpanNode): string => (span.attributes["tool.name"] as string) || span.name.replace(/^tool:/, "");
+
+/**
+ * Whether a span may get its posted id from a span annotation: a call of a tool that posts to the thread (see postOf), that did
+ * not fail, and whose own attributes record no posted id. An attribute decides, so an annotation could not change what is read
+ * for a span that has one; the client asks Phoenix for the annotations of these spans only.
+ */
+export function wantsPostedId(span: SpanNode): boolean {
+  if (span.spanId === "" || !isToolCall(span) || span.statusCode === "ERROR" || postedIdsOf(span.attributes).length > 0) {
+    return false;
+  }
+  return postOf(toolNameOf(span), span.attributes) !== null;
 }
 
 /** `true`/`false` from a boolean or from the words; null for anything else. */
@@ -444,9 +488,10 @@ export class ThreadAggregator {
     // listed, but it is not known to have been handled: it is not counted and nothing links to it.
     const triggers = new Set(rawTurns.map((t) => t.nostrEventId).filter((id): id is string => Boolean(id)));
     // Whether a turn's runtime is seen to write the contract (steer records, posted ids), so that a steered message would show.
+    // An id that only a span annotation records says nothing about the runtime: someone wrote it afterwards.
     const writesContract = (turn: AgentTurn) =>
       Boolean(turn.steerCapped) ||
-      (turn.postedEventIds ?? []).length > 0 ||
+      (turn.postedEventIds ?? []).some((id) => !(turn.annotatedEventIds ?? []).includes(id)) ||
       turn.spans.some((span) => span.name === STEER_SPAN_NAME || span.events.some((event) => event.name === STEER_EVENT_NAME));
     const agentsWritingContract = new Set(rawTurns.filter(writesContract).map((t) => t.agentName));
     for (const turn of rawTurns) {
@@ -661,6 +706,14 @@ export class ThreadAggregator {
     const tools: ToolExecution[] = [];
     const postedTexts: string[] = [];
     const postedEventIds: string[] = [];
+    // Where each posted id was read. An id a span records is the runtime's, even if an annotation says the same.
+    const idSources = new Map<string, PostedIdSource>();
+    const noteSource = (id: string, source: PostedIdSource) => {
+      const known = idSources.get(id);
+      if (known === undefined || (known === "annotation" && source !== "annotation")) {
+        idSources.set(id, source);
+      }
+    };
     const answeredEventIds: string[] = [];
     const posts: PostRecord[] = [];
     const recordedSteers: SteeredMessage[] = [];
@@ -712,13 +765,12 @@ export class ThreadAggregator {
         }
       }
 
-      const isToolSpan =
-        span.name.startsWith("tool:") ||
-        ((span.spanKind === "TOOL" || span.spanKind === "SPAN_KIND_INTERNAL") && "tool.name" in attrs);
+      const isToolSpan = isToolCall(span);
 
       // Ids of posted messages a span records. A call that failed created no message, whatever its span says.
       if (!(isToolSpan && span.statusCode === "ERROR")) {
         for (const posted of postedIdsOf(attrs)) {
+          noteSource(posted, "attribute");
           if (!postedEventIds.includes(posted)) {
             postedEventIds.push(posted);
           }
@@ -739,7 +791,7 @@ export class ThreadAggregator {
 
       // Check for Tool span
       if (isToolSpan) {
-        const toolName = (attrs["tool.name"] as string) || span.name.replace(/^tool:/, "");
+        const toolName = toolNameOf(span);
         const rawToolIn = attrs["input.value"];
         const semanticIn = extractSemanticToolInput(rawToolIn);
         const toolIn = semanticIn.length > 80 ? semanticIn.slice(0, 80) : semanticIn;
@@ -759,15 +811,18 @@ export class ThreadAggregator {
           toolWindows.push([span.startTime.getTime(), (span.endTime ?? span.startTime).getTime()]);
         }
         if (span.statusCode !== "ERROR") {
-          const post = postOf(toolName, attrs);
+          const post = postOf(toolName, attrs, span.annotations);
           if (post?.text) {
             postedTexts.push(post.text);
           }
           if (post?.replyTo && !answeredEventIds.includes(post.replyTo)) {
             answeredEventIds.push(post.replyTo);
           }
-          if (post?.eventId && !postedEventIds.includes(post.eventId)) {
-            postedEventIds.push(post.eventId);
+          if (post?.eventId && post.eventIdSource) {
+            noteSource(post.eventId, post.eventIdSource);
+            if (!postedEventIds.includes(post.eventId)) {
+              postedEventIds.push(post.eventId);
+            }
           }
           if (post && span.startTime) {
             posts.push({
@@ -777,6 +832,7 @@ export class ThreadAggregator {
               text: post.text,
               replyTo: post.replyTo,
               eventId: post.eventId,
+              ...(post.eventIdSource ? { eventIdSource: post.eventIdSource } : {}),
             });
           }
         }
@@ -784,6 +840,7 @@ export class ThreadAggregator {
     }
 
     const modelCalls = countModelCalls(toolWindows);
+    const annotatedEventIds = postedEventIds.filter((id) => idSources.get(id) === "annotation");
 
     // The recorded steered messages: one message once (a span wins over an event), and never the one that started the turn.
     const steered: SteeredMessage[] = [];
@@ -819,6 +876,7 @@ export class ThreadAggregator {
       senderName,
       postedTexts,
       postedEventIds,
+      ...(annotatedEventIds.length > 0 ? { annotatedEventIds } : {}),
       answeredEventIds,
       posts,
       steered,
@@ -929,7 +987,8 @@ export class ThreadAggregator {
         // inferred one was chosen because it could have posted before the child started. A turn that replies to a
         // message the parent posted may well start while the parent is still finishing, so it is not an overlap.
         if (type === "REPLY_TO" && parent.startTime && turn.startTime) {
-            const postedAt = resolution.basis === "posted" ? parent.posts?.find((p) => p.eventId === turn.nostrReplyTo)?.start : undefined;
+            const knownPost = resolution.basis === "posted" || resolution.basis === "annotation";
+            const postedAt = knownPost ? parent.posts?.find((p) => p.eventId === turn.nostrReplyTo)?.start : undefined;
             const parentTime = postedAt ?? parent.startTime.getTime();
             const childTime = turn.startTime.getTime();
             const parentEndTime = parent.endTime ? parent.endTime.getTime() : parentTime;
@@ -949,7 +1008,7 @@ export class ThreadAggregator {
                   parentStartTime: parent.startTime.toISOString(),
                 },
               });
-            } else if (resolution.basis !== "posted" && parent.endTime && childTime < parentEndTime - 100) {
+            } else if (!knownPost && parent.endTime && childTime < parentEndTime - 100) {
               const overlapMs = parentEndTime - childTime;
               clockSkewAnomalies.push({
                 type: "CAUSAL_OVERLAP",
@@ -1066,7 +1125,7 @@ export class ThreadAggregator {
             message:
               `Turn ${turn.turnIndex} (${turn.agentName}) replies to message ${turn.nostrReplyTo.slice(0, 8)}…, which no span ` +
               `records as posted. ${who} could have posted it, so no parent is picked. Record nostr.posted_event_id on the ` +
-              "reply spans to make this exact.",
+              "reply spans (as an attribute, or afterwards as a span annotation of that name) to make this exact.",
             turnIndex: turn.turnIndex,
             traceId: turn.traceId,
             details: { messageId: turn.nostrReplyTo, candidates: turnsNamed },

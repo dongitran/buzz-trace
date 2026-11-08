@@ -42,6 +42,19 @@ export interface FakeSession {
   traces?: string[];
 }
 
+/** A span annotation as an operator tool writes it (`POST /v1/span_annotations`); what the server adds is made up here. */
+export interface FakeAnnotation {
+  span_id: string;
+  name: string;
+  label: string | null;
+  project?: string;
+  identifier?: string;
+  /** `null` leaves the time out of the answer, as a Phoenix that does not give it would. */
+  created_at?: string | null;
+  updated_at?: string | null;
+  explanation?: string | null;
+}
+
 export class FakePhoenix {
   calls: FakeCall[] = [];
   projects: FakeProject[] = [
@@ -50,6 +63,10 @@ export class FakePhoenix {
   ];
   spans: Array<RestSpan & { project: string }> = [];
   sessions: FakeSession[] = [];
+  /** Span annotations, oldest first (a listing gives the newest first, as Phoenix does). */
+  annotations: FakeAnnotation[] = [];
+  /** The most rows a page of annotations holds, whatever `limit` asks for: a few rows are enough to test the cursor. */
+  annotationPageSize = 10000;
   /** Authentication: when set, a request needs a valid API key or access token. */
   requireAuth = false;
   apiKeys = new Set<string>();
@@ -220,6 +237,14 @@ export class FakePhoenix {
       }
       return this.spansResponse(p.name, call);
     }
+    m = /^\/v1\/projects\/([^/]+)\/span_annotations$/.exec(call.path);
+    if (m) {
+      const p = this.project(decodeURIComponent(m[1]));
+      if (!p) {
+        return this.json({ detail: `Project with name ${decodeURIComponent(m[1])} not found` }, 404);
+      }
+      return this.annotationsResponse(p.name, call);
+    }
     return this.json({ detail: "Not Found" }, 404);
   };
 
@@ -257,6 +282,61 @@ export class FakePhoenix {
     const page = list.slice(offset, offset + limit);
     const next = offset + limit < list.length ? String(offset + limit) : null;
     return this.json({ data: page.map(({ project: _p, ...span }) => span), next_cursor: next });
+  }
+
+  /**
+   * `GET /v1/projects/{p}/span_annotations`, as the live Phoenix 21 answers it (checked read-only on the real server): `span_ids`
+   * is repeated, never comma-joined; with neither `span_ids` nor `identifier` it is 422; `limit` defaults to 10 and is at most
+   * 10000; when none of the span ids is in the project it is 404 (one that is, among others that are not, is 200).
+   */
+  private annotationsResponse(project: string, call: FakeCall): Response {
+    const q = call.query;
+    const spanIds = q.getAll("span_ids");
+    const identifier = q.get("identifier");
+    if (spanIds.length === 0 && !identifier) {
+      return this.json({ detail: "At least one of span_ids or identifier must be supplied" }, 422);
+    }
+    const limit = Number(q.get("limit") ?? 10);
+    if (!(limit > 0) || limit > 10000) {
+      return this.json({ detail: [{ type: "less_than_equal", loc: ["query", "limit"], msg: "Input should be less than or equal to 10000" }] }, 422);
+    }
+    if (spanIds.length > 0) {
+      const known = new Set(this.spans.filter((s) => s.project === project).map((s) => s.context.span_id));
+      if (!spanIds.some((id) => known.has(id))) {
+        return this.json({ detail: "None of the supplied span_ids exist in this project" }, 404);
+      }
+    }
+    const names = q.getAll("include_annotation_names");
+    const rows = this.annotations
+      .map((a, i) => ({ a, n: i + 1 }))
+      .filter(
+        ({ a }) =>
+          (a.project ?? "ba") === project &&
+          (spanIds.length === 0 || spanIds.includes(a.span_id)) &&
+          (names.length === 0 || names.includes(a.name)) &&
+          (!identifier || (a.identifier ?? "relay-backfill-v1") === identifier),
+      )
+      .reverse();
+    const size = Math.min(limit, this.annotationPageSize);
+    const offset = Number(q.get("cursor") ?? 0);
+    const page = rows.slice(offset, offset + size);
+    const next = offset + size < rows.length ? String(offset + size) : null;
+    return this.json({
+      data: page.map(({ a, n }) => ({
+        id: btoa(`SpanAnnotation:${n}`),
+        created_at: a.created_at === undefined ? "2026-11-08T07:43:29+00:00" : a.created_at,
+        updated_at: a.updated_at === undefined ? (a.created_at ?? "2026-11-08T07:43:53+00:00") : a.updated_at,
+        source: "API",
+        user_id: "VXNlcjox",
+        name: a.name,
+        annotator_kind: "CODE",
+        result: { label: a.label, score: null, explanation: a.explanation ?? "id of the message this reply call posted" },
+        metadata: { source: "relay-backfill" },
+        identifier: a.identifier ?? "relay-backfill-v1",
+        span_id: a.span_id,
+      })),
+      next_cursor: next,
+    });
   }
 }
 

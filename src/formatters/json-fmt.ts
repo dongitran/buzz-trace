@@ -88,6 +88,8 @@ export class JsonRenderer {
             ...(t.parentCandidates && t.parentCandidates.length > 0 ? { candidates: t.parentCandidates } : {}),
             // The first 8 hex of the message this turn replies to, and of the messages it posted (when recorded).
             ...(t.parentMessage ? { parent_msg: t.parentMessage.id.slice(0, 8) } : {}),
+            // The link is exact, but the posted id behind it was written into Phoenix afterwards, as a span annotation.
+            ...(t.parentMessage?.basis === "annotation" ? { parent_basis: "annotation" } : {}),
             ...(t.postedEventIds && t.postedEventIds.length > 0 ? { posted_ids: t.postedEventIds.map((id) => id.slice(0, 8)) } : {}),
             // With steering a message that arrives mid-turn is injected into the running turn: how many it handled, and which.
             // A message the turn ended before receiving is listed apart, and is not one it handled.

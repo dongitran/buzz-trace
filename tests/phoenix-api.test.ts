@@ -55,7 +55,14 @@ describe("locating a thread", () => {
     const [bySession, byTrace] = fake.of(/\/spans$/);
     expect(bySession.query.get("attribute")).toBe(`session.id:"${SESSION}"`);
     expect(byTrace.query.getAll("trace_id").sort()).toEqual([...TRACES]);
-    expect(fake.calls.map((c) => c.path).filter((p) => !p.endsWith("/spans"))).toEqual([]);
+  });
+
+  it("and one more for the annotations of the reply spans that record no id (the first turn's reply records its own)", async () => {
+    const found = await client().locateThread(SESSION, "ba");
+    expect(fake.calls.map((c) => c.path).filter((p) => !p.endsWith("/spans"))).toEqual(["/v1/projects/ba/span_annotations"]);
+    const replies = found.spans.filter((s) => s.name === "tool:mcp__buzz-thread__reply" && !s.attributes["nostr.posted_event_id"]);
+    expect(replies).toHaveLength(2);
+    expect(fake.of(/\/span_annotations$/)[0].query.getAll("span_ids").sort()).toEqual(replies.map((s) => s.spanId).sort());
   });
 
   it("reads the spans of a trace that do not carry the session id, with their events", async () => {

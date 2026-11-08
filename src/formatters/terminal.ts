@@ -201,7 +201,8 @@ export class TerminalRenderer {
         for (const post of posts) {
           const text = (post.text ?? "").replace(/\s+/g, " ").trim();
           const shown = text.length > 120 ? `${text.slice(0, 120)}...` : text;
-          lines.push(`  ${this.dim("│")}  ${this.bold("Posted   :")} ${post.eventId ? shortId(post.eventId) : ID_NOT_RECORDED}  "${shown}"`);
+          const id = post.eventId ? `${shortId(post.eventId)}${post.eventIdSource === "annotation" ? " (span annotation)" : ""}` : ID_NOT_RECORDED;
+          lines.push(`  ${this.dim("│")}  ${this.bold("Posted   :")} ${id}  "${shown}"`);
         }
         const unplaced = (turn.postedEventIds ?? []).filter((id) => !posts.some((post) => post.eventId === id));
         if (unplaced.length > 0) {

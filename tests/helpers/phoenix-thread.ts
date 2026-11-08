@@ -257,6 +257,21 @@ export function turnSpans(spec: TurnSpec): SpanNode[] {
   return spans;
 }
 
+/** 2026-11-08 07:43:29 UTC: when the owner's operator tool wrote the annotations on the old thread. */
+export const ANNOTATED_AT = Date.UTC(2026, 10, 8, 7, 43, 29);
+
+/**
+ * What an operator tool writes on a reply span after the fact: a span annotation named like the attribute, labelled with the id
+ * of the message the call posted. Attaches it to the span (the client does this when it reads a thread from Phoenix).
+ */
+export function annotate(spans: SpanNode[], spanId: string, label: string | null, options: { at?: number | null; name?: string } = {}): void {
+  const span = spans.find((s) => s.spanId === spanId);
+  if (!span) {
+    throw new Error(`no span ${spanId} in the fixture`);
+  }
+  span.annotations.push({ name: options.name ?? "nostr.posted_event_id", label, at: options.at === undefined ? ANNOTATED_AT : options.at });
+}
+
 /**
  * The thread the owner checked (project `ba`): Kent Twin and Paul Twin are both started by the root message and answer it
  * about a second apart; the person then replies to KENT's message (an id no span records) asking Paul. Ground truth from
