@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Found by running buzz-trace against real multi-round and multi-agent Buzz threads of the `ba` community (one agent over
 four rounds, a hand-off Kent → Ann → Kent → James, and one message that started two agents), scored against what was
-actually sent: parent links were right for 4 of 11 turns, now 10 of 11, and the 11th is flagged as ambiguous.
+actually sent: parent links were right for 8 of 11 turns, now 10 of 11, and the 11th is flagged as ambiguous.
 
 ### Added
 - **Buzz envelope reader** (`parseBuzzEnvelope`): turns' sender, the message the person wrote, its parent and thread root
