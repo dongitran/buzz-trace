@@ -15,7 +15,11 @@ Distributed thread observability, AI query engine, and telemetry diagnostic CLI 
 2. **Causality DAG Over Clock Skew**:
    - Distributed containers (across WSL2, NUC, cloud VMs) have millisecond clock drifts.
    - Always trust `reply_to` causality edges over raw timestamps for turn sequencing and thread DAG topology.
-3. **Token-Budgeted Context Protection**:
+   - Edges have three strengths. No `edge` field in compact output means an exact `reply_to` link. `"edge":"inferred"` means the person answered an agent's own message, which no turn started from, so the parent is the latest finished turn. An `AMBIGUOUS_PARENT` anomaly names the other turns it could equally be. Agents started by one message are siblings, never parent and child.
+3. **Tokens Are Summed Over Model Calls**:
+   - A turn's `tokens` add up every model call of the turn, and each tool step is one more call that re-reads the whole context. `calls` and `ctx` (shown when a turn made more than one call) give the estimated context of ONE call. Judge context size with `ctx`, never with `tokens`.
+   - `CONTEXT_GROWTH` means an agent's context per call keeps growing round after round in a thread session: look for a static block repeated in every prompt.
+4. **Token-Budgeted Context Protection**:
    - Never load raw full-thread timelines into an LLM agent context window.
    - Always use `--compact --json` (add `--flat` for single-line zero-whitespace JSON) combined with filters (`--last 1`, `--failures`, `--turn N`) to keep query payloads under 200 tokens.
 
@@ -33,6 +37,8 @@ Distributed thread observability, AI query engine, and telemetry diagnostic CLI 
 | Inspect specific turn details | `buzz-trace query <thread_id> --turn <N> --tools --compact --json` | ~150 tokens |
 | Filter by specific agent | `buzz-trace query <thread_id> --agent <agent_name> --compact --json` | ~150 tokens |
 | Run automated diagnostics | `buzz-trace analyze <thread_id> --compact --json` | ~180 tokens |
+| Thread cost and who answered whom | `buzz-trace query <thread_id> --compact --json --flat` (`cost_usd`, `parent`, `edge`) | ~250 tokens |
+| Phoenix with authentication on | `PHOENIX_API_KEY=… buzz-trace query <thread_id> --project <community>` or `--db <copy of phoenix.db>` | same |
 | Full human-readable terminal view | `buzz-trace inspect <thread_id> [--project <community>]` | Terminal UI |
 | Watch live thread execution | `buzz-trace watch <thread_id> [--interval 2.0]` | Interactive |
 | List recent thread sessions | `buzz-trace sessions [--limit 10] [--project <community>]` | Terminal UI |
@@ -87,9 +93,12 @@ buzz-trace query <thread_id> --last 1 --compact --json --project <community>
     {
       "turn": 2,
       "agent": "phoenix-twin",
+      "parent": 1,
       "status": "OK",
       "dur_s": 32.0,
       "tokens": 79332,
+      "calls": 3,
+      "ctx": 26444,
       "trace_url": "http://localhost:6006/projects/mobile/traces/237cdb2708d2f160c5174fdd8ed47086",
       "response": "Tôi đã thực hiện phép tính bằng Python...",
       "tools": [
@@ -200,6 +209,18 @@ buzz-trace context <thread_id> --budget 200 --flat
 
 ---
 
+### 8. Who Answered Whom, and What It Cost (<250 tokens)
+
+```bash
+buzz-trace query <thread_id> --compact --json --flat --project <community>
+```
+
+Read `turns[].parent` (the turn it continues), `turns[].edge` (present only when the link is not exact), `cost_usd` (the thread, USD) and `turns[].ctx`. For one turn's full links use `inspect --json`: `event_id`, `reply_to`, `root_id`, `sender`, `parent_edge`, `posted` (what the turn wrote to the thread) and `tokens.cache_read`.
+
+### 9. A Thread Was Not Found
+
+`status: "NOT_FOUND"` is an answer about the places that were searched, not about the thread. Read `tried`: it lists each place with what it said, and the write time of a SQLite file. An auto-detected `~/.phoenix/phoenix.db` can be a stale copy made days ago. If Phoenix answered 401 or 403, buzz-trace exits with code 2 and names `PHOENIX_API_KEY` and `--db`.
+
 ## Rationalization Table & Traps
 
 | Temptation / Rationalization | Why It Fails | What To Do Instead |
@@ -209,6 +230,10 @@ buzz-trace context <thread_id> --budget 200 --flat
 | "Timestamps show Turn 2 started before Turn 1 finished, so the trace must be corrupted." | Distributed containers across hosts experience NTP clock jitter. | Trust the topological `reply_to` DAG built by `buzz-trace`, not wall-clock times. |
 | "I can query Phoenix REST API directly with curl." | Raw Phoenix span tables contain unaggregated low-level OTel JSON requiring complex session stitching. | Let `buzz-trace` aggregate spans, compute DAGs, and format metrics. |
 | "Command failed because project was not found." | Default project is `mobile`. | Pass `--project <community>` matching the active Nostr community. |
+| "`tokens` is 170k, so the context is nearly full." | `tokens` is summed over the turn's model calls; 3 calls of 57k read as 170k. | Read `ctx`. TOKEN_BLOAT and TOKEN_INFLATION already judge per call. |
+| "`NOT_FOUND`, so the thread never ran." | It only says the places searched had nothing (a stale local copy, a wrong `--project`). | Read `tried`; pass `--db <live copy>` or `--project <community>`. |
+| "No `edge` on a turn, so its parent is a guess." | The opposite: no `edge` is the exact link; `inferred` is the guess. | Check `AMBIGUOUS_PARENT` before relying on an inferred parent. |
+| "Two agents answered the same message, so one replied to the other." | They were started by the same message: siblings. | Trust `parent`, not the order of the turns. |
 
 ---
 

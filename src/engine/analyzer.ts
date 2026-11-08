@@ -2,7 +2,7 @@
  * Analytical intelligence and automated anomaly detector for thread telemetry.
  */
 
-import { Anomaly, ThreadTelemetry } from "../models.js";
+import { AgentTurn, Anomaly, ThreadTelemetry } from "../models.js";
 
 export interface AnomalyDetectorOptions {
   tokenBloatThreshold?: number;
@@ -11,6 +11,14 @@ export interface AnomalyDetectorOptions {
   tokenInflationMultiplier?: number;
   tokenInflationMinDelta?: number;
   slowToolMs?: number;
+  /** An agent's context per call must grow by this factor, and by `contextGrowthMinDelta`, over its turns in a thread. */
+  contextGrowthMultiplier?: number;
+  contextGrowthMinDelta?: number;
+}
+
+/** The tokens one model call read: the turn's prompt tokens are summed over its calls, so judge the per-call size. */
+function contextOf(turn: AgentTurn): number {
+  return turn.contextPerCall ?? turn.promptTokens;
 }
 
 export class AnomalyDetector {
@@ -20,6 +28,8 @@ export class AnomalyDetector {
   readonly tokenInflationMultiplier: number;
   readonly tokenInflationMinDelta: number;
   readonly slowToolMs: number;
+  readonly contextGrowthMultiplier: number;
+  readonly contextGrowthMinDelta: number;
 
   constructor(options: AnomalyDetectorOptions = {}) {
     this.tokenBloatThreshold = options.tokenBloatThreshold ?? 150000;
@@ -28,6 +38,8 @@ export class AnomalyDetector {
     this.tokenInflationMultiplier = options.tokenInflationMultiplier ?? 2.0;
     this.tokenInflationMinDelta = options.tokenInflationMinDelta ?? 15000;
     this.slowToolMs = options.slowToolMs ?? 5000;
+    this.contextGrowthMultiplier = options.contextGrowthMultiplier ?? 2.0;
+    this.contextGrowthMinDelta = options.contextGrowthMinDelta ?? 30000;
   }
 
   analyze(telemetry: ThreadTelemetry): Anomaly[] {
@@ -162,14 +174,19 @@ export class AnomalyDetector {
       }
 
       // 6. Token Bloat Check
-      if (turn.promptTokens >= this.tokenBloatThreshold) {
+      const context = contextOf(turn);
+      if (context >= this.tokenBloatThreshold) {
+        const calls = turn.modelCalls ?? 1;
         anomalies.push({
           type: "TOKEN_BLOAT",
           severity: "WARNING",
-          message: `Excessive prompt context in Turn ${turn.turnIndex}: ${turn.promptTokens.toLocaleString()} tokens (threshold: ${this.tokenBloatThreshold.toLocaleString()}).`,
+          message:
+            calls > 1
+              ? `Excessive prompt context in Turn ${turn.turnIndex}: ~${context.toLocaleString()} tokens per model call (${turn.promptTokens.toLocaleString()} summed over ~${calls} calls; threshold: ${this.tokenBloatThreshold.toLocaleString()} per call).`
+              : `Excessive prompt context in Turn ${turn.turnIndex}: ${turn.promptTokens.toLocaleString()} tokens (threshold: ${this.tokenBloatThreshold.toLocaleString()}).`,
           turnIndex: turn.turnIndex,
           traceId: turn.traceId,
-          details: { promptTokens: turn.promptTokens },
+          details: { promptTokens: turn.promptTokens, modelCalls: calls, contextPerCall: context },
         });
       }
 
@@ -189,13 +206,27 @@ export class AnomalyDetector {
     // 8. Cross-Turn Token Inflation Check (exponential token growth between turns)
     for (let i = 1; i < telemetry.turns.length; i++) {
       const curr = telemetry.turns[i];
-      const prev = curr.parentTurnIndex
-        ? telemetry.turns.find((t) => t.turnIndex === curr.parentTurnIndex) || telemetry.turns[i - 1]
-        : telemetry.turns[i - 1];
+      // An agent's prompt is mostly its own system prompt, tools and session: compare it with that agent's previous
+      // turn when there is one. Another agent's turn (the parent, else the previous turn) is the fallback.
+      let sameAgentPrev: AgentTurn | undefined;
+      for (let j = i - 1; j >= 0; j--) {
+        if (telemetry.turns[j].agentName === curr.agentName) {
+          sameAgentPrev = telemetry.turns[j];
+          break;
+        }
+      }
+      const prev =
+        sameAgentPrev ??
+        (curr.parentTurnIndex
+          ? telemetry.turns.find((t) => t.turnIndex === curr.parentTurnIndex) || telemetry.turns[i - 1]
+          : telemetry.turns[i - 1]);
 
-      if (prev && prev.promptTokens > 0) {
-        const ratio = curr.promptTokens / prev.promptTokens;
-        const delta = curr.promptTokens - prev.promptTokens;
+      if (prev && contextOf(prev) > 0) {
+        // Per model call, not summed: a turn that made one more call than the last reads as 1.5x with nothing grown.
+        const prevContext = contextOf(prev);
+        const currContext = contextOf(curr);
+        const ratio = currContext / prevContext;
+        const delta = currContext - prevContext;
         if (ratio >= this.tokenInflationMultiplier && delta >= this.tokenInflationMinDelta) {
           anomalies.push({
             type: "TOKEN_INFLATION",
@@ -205,13 +236,57 @@ export class AnomalyDetector {
             traceId: curr.traceId,
             details: {
               prevTurnIndex: prev.turnIndex,
-              prevTokens: prev.promptTokens,
-              currTokens: curr.promptTokens,
+              prevTokens: prevContext,
+              currTokens: currContext,
               ratio: Number(ratio.toFixed(2)),
               deltaTokens: delta,
             },
           });
         }
+      }
+    }
+
+    // 8b. Context growth round after round: an agent's context per model call, first turn to last, in this thread.
+    const byAgent = new Map<string, AgentTurn[]>();
+    for (const turn of telemetry.turns) {
+      const list = byAgent.get(turn.agentName) ?? [];
+      list.push(turn);
+      byAgent.set(turn.agentName, list);
+    }
+    for (const [agent, turns] of byAgent) {
+      if (turns.length < 3) {
+        continue;
+      }
+      const first = turns[0];
+      const last = turns[turns.length - 1];
+      const firstContext = contextOf(first);
+      const lastContext = contextOf(last);
+      if (firstContext <= 0) {
+        continue;
+      }
+      const delta = lastContext - firstContext;
+      if (lastContext / firstContext >= this.contextGrowthMultiplier && delta >= this.contextGrowthMinDelta) {
+        const rounds = turns.length - 1;
+        const perRound = Math.round(delta / rounds);
+        anomalies.push({
+          type: "CONTEXT_GROWTH",
+          severity: "WARNING",
+          message:
+            `Context per model call of ${agent} grew from ~${firstContext.toLocaleString()} (Turn ${first.turnIndex}) to ` +
+            `~${lastContext.toLocaleString()} (Turn ${last.turnIndex}), about +${perRound.toLocaleString()} a round: ` +
+            "each round's history is re-sent, so check whether every prompt repeats a large static block.",
+          turnIndex: last.turnIndex,
+          traceId: last.traceId,
+          details: {
+            agent,
+            firstTurn: first.turnIndex,
+            lastTurn: last.turnIndex,
+            firstContext,
+            lastContext,
+            perRound,
+            turns: turns.length,
+          },
+        });
       }
     }
 

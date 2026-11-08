@@ -95,7 +95,9 @@ export type AnomalyType =
   | "UNHANDLED_EXCEPTION"
   | "CLOCK_SKEW"
   | "CAUSAL_OVERLAP"
-  | "INVALID_DURATION";
+  | "INVALID_DURATION"
+  | "AMBIGUOUS_PARENT"
+  | "CONTEXT_GROWTH";
 export type AnomalySeverity = "CRITICAL" | "WARNING" | "INFO";
 
 export interface Anomaly {
@@ -107,10 +109,21 @@ export interface Anomaly {
   details?: Record<string, unknown>;
 }
 
+/**
+ * How a turn was linked to its parent turn:
+ * - REPLY_TO: the message that started the turn replies to a message we can tie to that turn exactly — the message
+ *   that started it, or (when telemetry records posted event ids) a message it posted;
+ * - INFERRED: the message replies to an event no turn is known for (in a Buzz thread, almost always an agent's own
+ *   reply), so the parent is the latest turn of the same thread that had finished by then;
+ * - THREAD_ROOT: only the thread's root ties the turn to the turn the root started;
+ * - TEMPORAL: ordering only.
+ */
+export type ThreadEdgeType = "REPLY_TO" | "INFERRED" | "THREAD_ROOT" | "TEMPORAL";
+
 export interface ThreadDAGEdge {
   fromTurnIndex: number;
   toTurnIndex: number;
-  type: "REPLY_TO" | "TEMPORAL";
+  type: ThreadEdgeType;
 }
 
 export interface ThreadBranch {
@@ -134,7 +147,17 @@ export interface AgentTurn {
   nostrEventId?: string | null;
   nostrReplyTo?: string | null;
   nostrRootId?: string | null;
+  /** Who wrote the message that started the turn (`nostr.sender_name`, else the Buzz envelope's From). */
+  senderName?: string | null;
+  /** What the turn posted to the thread through a reply/send tool, in order. */
+  postedTexts?: string[];
+  /** Event ids of the messages the turn posted, when telemetry records them (`nostr.posted_event_id[s]`). */
+  postedEventIds?: string[];
   parentTurnIndex?: number | null;
+  /** How the parent was found; null for a root turn. */
+  parentEdgeType?: ThreadEdgeType | null;
+  /** Other turns that fit an INFERRED parent as well (they finished together, from other agents). */
+  parentAlternatives?: number[];
   depth?: number;
   branchId?: string;
   childrenTurnIndices?: number[];
@@ -145,6 +168,18 @@ export interface AgentTurn {
   completionTokens: number;
   reasoningTokens: number;
   totalTokens: number;
+  /**
+   * Model calls the turn made, estimated as one more than its steps of tools (tools that ran together are one step).
+   * A turn's prompt tokens are summed over all of its calls; this is what they are divided by.
+   */
+  modelCalls?: number;
+  /** Prompt tokens of one model call, estimated: the turn's prompt tokens over `modelCalls`. */
+  contextPerCall?: number;
+  /** Prompt tokens served from / written to the model's prompt cache (`llm.token_count.prompt_details.*`). */
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+  /** The turn's model cost in USD (`llm.cost.total`), counted once. */
+  costUsd?: number;
   statusCode: string;
   statusMessage?: string | null;
   promptPreview: string;
@@ -161,11 +196,17 @@ export interface ThreadTelemetryJSON {
   nostr_channel_id?: string | null;
   phoenix_ui_url?: string | null;
   phoenix_session_url?: string | null;
+  /** Where the telemetry was read from: `sqlite:<path>` or the Phoenix endpoint. */
+  source?: string | null;
+  /** For a thread that was not found: every place that was looked in, and what each said. */
+  tried?: string[];
   total_turns: number;
   total_tokens: number;
   total_prompt_tokens: number;
   total_completion_tokens: number;
   total_duration_ms: number;
+  /** Model cost of the whole thread in USD, each turn counted once (null when no turn reported one). */
+  total_cost_usd?: number | null;
   start_time: string | null;
   end_time: string | null;
   status: string;
@@ -192,7 +233,17 @@ export interface ThreadTelemetryJSON {
   }>;
   turns: Array<{
     turn_index: number;
+    /** The Buzz message that started the turn, what it replies to, and the thread's root. */
+    event_id?: string | null;
+    reply_to?: string | null;
+    root_id?: string | null;
+    /** Who wrote the message that started the turn. */
+    sender?: string | null;
     parent_turn_index?: number | null;
+    /** How the parent was found: REPLY_TO (exact), INFERRED, THREAD_ROOT; null for a root turn. */
+    parent_edge?: string | null;
+    /** Other turns an INFERRED parent could equally have been. */
+    parent_alternatives?: number[];
     depth?: number;
     branch_id?: string;
     children_turn_indices?: number[];
@@ -208,7 +259,15 @@ export interface ThreadTelemetryJSON {
       completion: number;
       reasoning: number;
       total: number;
+      cache_read?: number;
+      cache_write?: number;
     };
+    /** Estimated model calls of the turn and the prompt tokens of one call (see AgentTurn.modelCalls). */
+    model_calls?: number;
+    context_per_call?: number | null;
+    cost_usd?: number | null;
+    /** What the turn posted to the thread, in order. */
+    posted?: string[];
     prompt_preview: string;
     response_preview: string;
     tools: Array<{
@@ -235,12 +294,18 @@ export class ThreadTelemetry {
   totalPromptTokens: number;
   totalCompletionTokens: number;
   totalDurationMs: number;
+  /** Model cost of the whole thread in USD; null when no turn reported one. */
+  totalCostUsd: number | null;
   startTime?: Date;
   endTime?: Date;
   status: string;
   dag?: ThreadDAG;
   turns: AgentTurn[];
   anomalies: Anomaly[];
+  /** Where the telemetry was read from (`sqlite:<path>` or the Phoenix endpoint); null when nothing was found. */
+  source: string | null;
+  /** Every place that was looked in for the thread, and what each said (kept for a NOT_FOUND). */
+  sourcesTried: string[];
 
   constructor(init: Partial<ThreadTelemetry>) {
     this.threadId = init.threadId || "";
@@ -255,12 +320,15 @@ export class ThreadTelemetry {
     this.totalPromptTokens = init.totalPromptTokens || 0;
     this.totalCompletionTokens = init.totalCompletionTokens || 0;
     this.totalDurationMs = init.totalDurationMs || 0;
+    this.totalCostUsd = init.totalCostUsd ?? null;
     this.startTime = init.startTime;
     this.endTime = init.endTime;
     this.status = init.status || "OK";
     this.dag = init.dag;
     this.turns = init.turns || [];
     this.anomalies = init.anomalies || [];
+    this.source = init.source ?? null;
+    this.sourcesTried = init.sourcesTried ?? [];
   }
 
   toJSON(): ThreadTelemetryJSON {
@@ -272,11 +340,14 @@ export class ThreadTelemetry {
       nostr_channel_id: this.nostrChannelId || null,
       phoenix_ui_url: this.phoenixUiUrl || null,
       phoenix_session_url: this.phoenixSessionUrl || null,
+      source: this.source,
+      ...(this.status === "NOT_FOUND" && this.sourcesTried.length > 0 ? { tried: this.sourcesTried } : {}),
       total_turns: this.totalTurns,
       total_tokens: this.totalTokens,
       total_prompt_tokens: this.totalPromptTokens,
       total_completion_tokens: this.totalCompletionTokens,
       total_duration_ms: Number(this.totalDurationMs.toFixed(2)),
+      total_cost_usd: this.totalCostUsd,
       start_time: this.startTime ? this.startTime.toISOString() : null,
       end_time: this.endTime ? this.endTime.toISOString() : null,
       status: this.status,
@@ -305,7 +376,15 @@ export class ThreadTelemetry {
       })),
       turns: this.turns.map((t) => ({
         turn_index: t.turnIndex,
+        event_id: t.nostrEventId ?? null,
+        reply_to: t.nostrReplyTo ?? null,
+        root_id: t.nostrRootId ?? null,
+        sender: t.senderName ?? null,
         parent_turn_index: t.parentTurnIndex ?? null,
+        parent_edge: t.parentEdgeType ?? null,
+        ...(t.parentAlternatives && t.parentAlternatives.length > 0
+          ? { parent_alternatives: t.parentAlternatives }
+          : {}),
         depth: t.depth ?? 0,
         branch_id: t.branchId || "main",
         children_turn_indices: t.childrenTurnIndices || [],
@@ -321,7 +400,13 @@ export class ThreadTelemetry {
           completion: t.completionTokens,
           reasoning: t.reasoningTokens,
           total: t.totalTokens,
+          ...(t.cacheReadTokens ? { cache_read: t.cacheReadTokens } : {}),
+          ...(t.cacheWriteTokens ? { cache_write: t.cacheWriteTokens } : {}),
         },
+        model_calls: t.modelCalls ?? 1,
+        context_per_call: t.contextPerCall ?? null,
+        cost_usd: t.costUsd ?? null,
+        posted: t.postedTexts && t.postedTexts.length > 0 ? t.postedTexts : [],
         prompt_preview: t.promptPreview,
         response_preview: t.responsePreview,
         tools: t.tools.map((tool) => ({

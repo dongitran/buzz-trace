@@ -265,3 +265,46 @@ describe("AnomalyDetector", () => {
     expect(unhandled?.message).toContain("ResourceExhausted");
   });
 });
+
+describe("AnomalyDetector token inflation across agents", () => {
+  const turn = (turnIndex: number, agentName: string, promptTokens: number, parentTurnIndex: number | null) => ({
+    turnIndex,
+    traceId: `tr-${turnIndex}`,
+    agentName,
+    modelName: "sonnet",
+    durationMs: 1000,
+    promptTokens,
+    completionTokens: 100,
+    reasoningTokens: 0,
+    totalTokens: promptTokens + 100,
+    statusCode: "OK",
+    statusMessage: null,
+    promptPreview: "",
+    responsePreview: "",
+    parentTurnIndex,
+    tools: [],
+    spans: [],
+  });
+
+  it("compares a turn with the same agent's previous turn, not with another agent's smaller prompt", () => {
+    // Kent hands off to Ann, whose prompt is small; Kent's next turn grows only a little over Kent's own first turn.
+    const t = new ThreadTelemetry({
+      threadId: "th-handoff",
+      turns: [turn(1, "kent", 60000, null), turn(2, "ann", 20000, 1), turn(3, "kent", 65000, 2)],
+    });
+    const anomalies = new AnomalyDetector().analyze(t);
+    expect(anomalies.filter((a) => a.type === "TOKEN_INFLATION")).toEqual([]);
+  });
+
+  it("still flags a same-agent turn whose prompt doubles", () => {
+    const t = new ThreadTelemetry({
+      threadId: "th-same-agent",
+      turns: [turn(1, "kent", 30000, null), turn(2, "ann", 90000, 1), turn(3, "kent", 70000, 2)],
+    });
+    const inflation = new AnomalyDetector().analyze(t).filter((a) => a.type === "TOKEN_INFLATION");
+    expect(inflation.map((a) => [a.turnIndex, a.details?.prevTurnIndex])).toEqual([
+      [2, 1],
+      [3, 1],
+    ]);
+  });
+});

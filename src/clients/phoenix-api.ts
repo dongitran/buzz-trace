@@ -37,10 +37,12 @@ export interface PhoenixSession {
 export class PhoenixClient {
   readonly endpoint: string;
   readonly timeoutMs: number;
+  private readonly apiKey: string | null;
 
-  constructor(endpoint = "http://localhost:6006", timeoutMs = 10000) {
+  constructor(endpoint = "http://localhost:6006", timeoutMs = 10000, apiKey: string | null = null) {
     this.endpoint = endpoint.replace(/\/+$/, "");
     this.timeoutMs = timeoutMs;
+    this.apiKey = apiKey;
   }
 
   private async get<T>(path: string, params?: Record<string, string | number | undefined>): Promise<T> {
@@ -63,7 +65,8 @@ export class PhoenixClient {
         method: "GET",
         headers: {
           Accept: "application/json",
-          "User-Agent": "buzz-trace/0.1.0",
+          "User-Agent": "buzz-trace",
+          ...(this.apiKey ? { Authorization: `Bearer ${this.apiKey}` } : {}),
         },
         signal: AbortSignal.timeout(this.timeoutMs),
       });
@@ -74,6 +77,15 @@ export class PhoenixClient {
           errBody = await response.text();
         } catch {
           // Ignore read error
+        }
+        if (response.status === 401 || response.status === 403) {
+          throw new PhoenixAPIError(
+            `HTTP ${response.status} from ${this.endpoint}: Phoenix authentication is on` +
+              `${this.apiKey ? " and rejected the API key" : ""}. Set PHOENIX_API_KEY (or pass --api-key) to a Phoenix ` +
+              "API key, or read the SQLite file directly with --db <path>." +
+              `${errBody ? ` (server said: ${errBody.slice(0, 120)})` : ""}`,
+            response.status,
+          );
         }
         throw new PhoenixAPIError(
           `HTTP ${response.status} ${response.statusText} for ${url}${errBody ? ` - ${errBody}` : ""}`,

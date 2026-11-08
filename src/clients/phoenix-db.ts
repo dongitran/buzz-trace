@@ -151,44 +151,119 @@ export class PhoenixDBClient {
       });
   }
 
-  listSessions(_project = "mobile", limit = 10): PhoenixSession[] {
-    const db = this.getDb();
-    const stmt = db.prepare(`
-        SELECT 
-          coalesce(json_extract(attributes, '$.session.id'), json_extract(attributes, '$.attributes.session.id'), t.trace_id) as session_id,
-          t.trace_id,
-          t.start_time,
-          t.end_time
-        FROM traces t
-        LEFT JOIN spans s ON s.trace_rowid = t.id AND s.parent_id IS NULL
-        WHERE session_id IS NOT NULL
-        GROUP BY t.trace_id
-        ORDER BY t.start_time DESC
-        LIMIT ?;
-      `);
-      const rows = stmt.all(limit) as unknown as Array<{ session_id: string; trace_id: string; start_time: string; end_time: string }>;
+  /** When the database was last written (its WAL counts: Phoenix writes there first). */
+  modifiedAt(): Date {
+    let latest = fs.statSync(this.dbPath).mtimeMs;
+    try {
+      latest = Math.max(latest, fs.statSync(`${this.dbPath}-wal`).mtimeMs);
+    } catch {
+      // no WAL file: the database file's time stands
+    }
+    return new Date(latest);
+  }
 
-      const map = new Map<string, PhoenixSession>();
-      for (const r of rows) {
-        const existing = map.get(r.session_id) || {
-          id: r.session_id,
-          session_id: r.session_id,
-          project_id: _project,
-          start_time: r.start_time,
-          end_time: r.end_time,
-          traces: [],
+  /**
+   * The newest `limit` sessions of `project`. Phoenix groups a thread's traces into a session; a trace that belongs
+   * to none is listed as a session of its own, named by the session id its turn carries (else by its trace id). A
+   * session's tokens are those of its model calls (LLM spans), so a turn's copy on the agent span is not counted twice.
+   */
+  listSessions(project = "mobile", limit = 10): PhoenixSession[] {
+    const db = this.getDb();
+    const projectRow = db.prepare("SELECT id FROM projects WHERE name = ?").get(project) as { id: number } | undefined;
+    if (!projectRow) {
+      return [];
+    }
+
+    interface TraceRow {
+      rowid: number;
+      trace_id: string;
+      start_time: string;
+      end_time: string;
+      session_rowid: number | null;
+      session_attr: string | null;
+      tokens: number;
+    }
+    const tokensOf = (alias: string) => `COALESCE(
+        CAST(json_extract(${alias}.attributes, '$.llm.token_count.total') AS INTEGER),
+        CAST(json_extract(${alias}.attributes, '$.llm.token_count.prompt') AS INTEGER) +
+          CAST(json_extract(${alias}.attributes, '$.llm.token_count.completion') AS INTEGER),
+        0)`;
+    const traceSelect = `
+      SELECT t.id AS rowid, t.trace_id, t.start_time, t.end_time, t.project_session_rowid AS session_rowid,
+        (SELECT json_extract(r.attributes, '$.session.id') FROM spans r
+          WHERE r.trace_rowid = t.id AND r.parent_id IS NULL LIMIT 1) AS session_attr,
+        COALESCE(
+          (SELECT SUM(${tokensOf("l")}) FROM spans l WHERE l.trace_rowid = t.id AND l.span_kind = 'LLM'),
+          (SELECT ${tokensOf("r2")} FROM spans r2 WHERE r2.trace_rowid = t.id AND r2.parent_id IS NULL LIMIT 1),
+          0) AS tokens
+      FROM traces t`;
+
+    const sessionRows = db
+      .prepare(
+        `SELECT id AS rowid, session_id, start_time, end_time FROM project_sessions
+         WHERE project_id = ? ORDER BY start_time DESC LIMIT ?`,
+      )
+      .all(projectRow.id, limit) as unknown as Array<{ rowid: number; session_id: string; start_time: string; end_time: string }>;
+
+    const sessions: PhoenixSession[] = [];
+    if (sessionRows.length > 0) {
+      const marks = sessionRows.map(() => "?").join(",");
+      const traceRows = db
+        .prepare(`${traceSelect} WHERE t.project_session_rowid IN (${marks}) ORDER BY t.start_time ASC`)
+        .all(...sessionRows.map((r) => r.rowid)) as unknown as TraceRow[];
+      for (const row of sessionRows) {
+        const own = traceRows.filter((t) => t.session_rowid === row.rowid);
+        sessions.push({
+          id: row.session_id,
+          session_id: row.session_id,
+          project_id: project,
+          start_time: row.start_time,
+          end_time: row.end_time,
+          traces: own.map((t) => ({ id: t.trace_id, trace_id: t.trace_id, start_time: t.start_time, end_time: t.end_time })),
           token_count_prompt: 0,
           token_count_completion: 0,
-          token_count_total: 0,
-        };
-        existing.traces.push({
-          id: r.trace_id,
-          trace_id: r.trace_id,
-          start_time: r.start_time,
-          end_time: r.end_time,
+          token_count_total: own.reduce((acc, t) => acc + t.tokens, 0),
         });
-        map.set(r.session_id, existing);
       }
-      return Array.from(map.values()).slice(0, limit);
+    }
+
+    const orphanRows = db
+      .prepare(`${traceSelect} WHERE t.project_rowid = ? AND t.project_session_rowid IS NULL ORDER BY t.start_time DESC LIMIT ?`)
+      .all(projectRow.id, limit) as unknown as TraceRow[];
+    const orphans = new Map<string, PhoenixSession>();
+    for (const t of orphanRows) {
+      const sid = t.session_attr || t.trace_id;
+      const existing = orphans.get(sid);
+      const trace = { id: t.trace_id, trace_id: t.trace_id, start_time: t.start_time, end_time: t.end_time };
+      if (existing) {
+        existing.traces.push(trace);
+        existing.token_count_total += t.tokens;
+        if (t.start_time < existing.start_time) {
+          existing.start_time = t.start_time;
+        }
+        if (t.end_time > existing.end_time) {
+          existing.end_time = t.end_time;
+        }
+      } else {
+        orphans.set(sid, {
+          id: sid,
+          session_id: sid,
+          project_id: project,
+          start_time: t.start_time,
+          end_time: t.end_time,
+          traces: [trace],
+          token_count_prompt: 0,
+          token_count_completion: 0,
+          token_count_total: t.tokens,
+        });
+      }
+    }
+    for (const orphan of orphans.values()) {
+      orphan.traces.sort((a, b) => a.start_time.localeCompare(b.start_time));
+    }
+
+    return [...sessions, ...orphans.values()]
+      .sort((a, b) => b.start_time.localeCompare(a.start_time))
+      .slice(0, limit);
   }
 }

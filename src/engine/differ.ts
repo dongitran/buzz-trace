@@ -68,6 +68,18 @@ export interface TraceDiffResult {
         delta_tokens: number;
       };
     };
+    /** The prompt tokens of one model call (estimated), when both turns have it: the totals above are summed over calls. */
+    context_per_call?: {
+      a: number;
+      b: number;
+      delta_tokens: number;
+      pct_change: number;
+    };
+    model_calls?: {
+      a: number;
+      b: number;
+      delta_count: number;
+    };
     tools: {
       count: {
         a: number;
@@ -206,6 +218,21 @@ export class TraceDiffer {
             delta_tokens: deltaReasoningTokens,
           },
         },
+        ...(turnA.contextPerCall && turnB.contextPerCall
+          ? {
+              context_per_call: {
+                a: turnA.contextPerCall,
+                b: turnB.contextPerCall,
+                delta_tokens: turnB.contextPerCall - turnA.contextPerCall,
+                pct_change: Number((((turnB.contextPerCall - turnA.contextPerCall) / turnA.contextPerCall) * 100).toFixed(2)),
+              },
+              model_calls: {
+                a: turnA.modelCalls ?? 1,
+                b: turnB.modelCalls ?? 1,
+                delta_count: (turnB.modelCalls ?? 1) - (turnA.modelCalls ?? 1),
+              },
+            }
+          : {}),
         tools: {
           count: {
             a: toolsA.length,
@@ -328,6 +355,13 @@ export class TraceDiffer {
     lines.push(
       `  └── Completion:   ${tokDiff.completion.a.toLocaleString()} -> ${tokDiff.completion.b.toLocaleString()} (Δ ${fmtDelta(tokDiff.completion.delta_tokens)})`,
     );
+
+    const ctxDiff = result.diff.context_per_call;
+    if (ctxDiff) {
+      lines.push(
+        `Context/call:      ${ctxDiff.a.toLocaleString()} -> ${ctxDiff.b.toLocaleString()} (Δ ${fmtDelta(ctxDiff.delta_tokens)}, ~per model call)`,
+      );
+    }
 
     // Tool executions
     const toolDiff = result.diff.tools;

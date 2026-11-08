@@ -84,6 +84,9 @@ export class ThreadQueryEngine {
       (a) => a.turnIndex === null || a.turnIndex === undefined || turnIndices.has(a.turnIndex),
     );
 
+    const costed = filteredTurns.filter((t) => t.costUsd !== undefined);
+    const filteredCost = costed.length > 0 ? costed.reduce((acc, t) => acc + (t.costUsd ?? 0), 0) : null;
+
     return new ThreadTelemetry({
       threadId: telemetry.threadId,
       project: telemetry.project,
@@ -97,6 +100,9 @@ export class ThreadQueryEngine {
       totalPromptTokens: filteredTurns.reduce((acc, t) => acc + t.promptTokens, 0),
       totalCompletionTokens: filteredTurns.reduce((acc, t) => acc + t.completionTokens, 0),
       totalDurationMs: filteredTurns.reduce((acc, t) => acc + t.durationMs, 0),
+      totalCostUsd: filteredCost,
+      source: telemetry.source,
+      sourcesTried: telemetry.sourcesTried,
       startTime: filteredTurns.length > 0 ? filteredTurns[0].startTime : telemetry.startTime,
       endTime: filteredTurns.length > 0 ? filteredTurns[filteredTurns.length - 1].endTime : telemetry.endTime,
       status: filteredTurns.some((t) => t.statusCode !== "OK") ? "ERROR" : telemetry.status,

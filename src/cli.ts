@@ -18,7 +18,7 @@ import { SpanNode, ThreadTelemetry } from "./models.js";
 
 const require = createRequire(import.meta.url);
 const pkg = require("../package.json") as { version: string };
-const VERSION = pkg.version || "0.1.9";
+const VERSION = pkg.version || "0.2.0";
 
 const HELP_TEXT = `
 buzz-trace ${VERSION}
@@ -42,6 +42,7 @@ OPTIONS:
   --ui-endpoint <url>   Arize Phoenix Web UI base URL (for clickable links)
   --project <name>      Arize Phoenix project name (default: mobile)
   --db <path>           Direct path to Phoenix SQLite database file (mode=ro)
+  --api-key <key>       Phoenix API key for a server with authentication on (default: $PHOENIX_API_KEY)
   --budget <num>        Token budget limit for context command (e.g. 200, 500)
   --turn1 <num>         First turn index for diff comparison
   --turn2 <num>         Second turn index for diff comparison
@@ -66,25 +67,56 @@ OPTIONS:
   --version             Show version
 `;
 
+/** `sqlite:<path> (written <UTC minute>)`: the file's age is what tells a stale copy from a live database. */
+function describeDb(db: PhoenixDBClient): string {
+  return `sqlite:${db.dbPath} (written ${db.modifiedAt().toISOString().slice(0, 16)}Z)`;
+}
+
 export async function fetchThreadTelemetry(config: Config, threadId: string): Promise<ThreadTelemetry> {
   let spans: SpanNode[] = [];
+  let source: string | null = null;
+  const tried: string[] = [];
+  let dbLabel: string | null = null;
+  let apiError: Error | null = null;
 
   if (config.dbPath) {
     const dbClient = new PhoenixDBClient(config.dbPath);
+    dbLabel = describeDb(dbClient);
     spans = dbClient.getSpansForThread(threadId);
+    if (spans.length > 0) {
+      source = `sqlite:${dbClient.dbPath}`;
+    } else {
+      tried.push(`${dbLabel}: no spans for it`);
+    }
   }
 
   if (spans.length === 0) {
-    const apiClient = new PhoenixClient(config.endpoint, config.timeout);
+    const apiClient = new PhoenixClient(config.endpoint, config.timeout, config.apiKey);
     try {
       spans = await apiClient.getSpansForThread(config.project, threadId);
-    } catch {
-      // Ignore API errors if DB was tried or API is unavailable
+      if (spans.length > 0) {
+        source = config.endpoint;
+      } else {
+        tried.push(`${config.endpoint}: no spans for it`);
+      }
+    } catch (err) {
+      apiError = err instanceof Error ? err : new Error(String(err));
+      tried.push(`${config.endpoint}: ${apiError.message}`);
     }
+  }
+
+  // Phoenix could not be asked and nothing else had the thread: that is a failure to look, not a thread that is not there.
+  if (spans.length === 0 && apiError) {
+    throw new Error(
+      `Thread ${threadId} was not found in ${dbLabel ?? "any local database"} and Phoenix at ${config.endpoint} ` +
+        `could not be queried: ${apiError.message}`,
+    );
   }
 
   const aggregator = new ThreadAggregator(threadId, config.project, null, config.uiEndpoint);
   const telemetry = aggregator.aggregate(spans);
+  telemetry.source = source;
+  telemetry.sourcesTried = tried;
 
   // Set Phoenix Web UI deep links
   telemetry.phoenixUiUrl = config.uiEndpoint;
@@ -312,15 +344,20 @@ export async function runContext(
 export async function runSessions(config: Config, limit = 10): Promise<number> {
   let sessions: PhoenixSession[] = [];
 
+  let sourceLabel: string;
+
   if (config.dbPath) {
     const dbClient = new PhoenixDBClient(config.dbPath);
     sessions = dbClient.listSessions(config.project, limit);
+    sourceLabel = describeDb(dbClient);
   } else {
-    const apiClient = new PhoenixClient(config.endpoint, config.timeout);
+    const apiClient = new PhoenixClient(config.endpoint, config.timeout, config.apiKey);
     sessions = await apiClient.listSessions(config.project, limit);
+    sourceLabel = config.endpoint;
   }
 
   console.log(`\nRECENT SESSIONS · Project: ${config.project} (showing up to ${limit})`);
+  console.log(`Source: ${sourceLabel}`);
   console.log("=".repeat(80));
 
   if (sessions.length === 0) {
@@ -531,6 +568,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     "ui-endpoint": { type: "string" as const },
     project: { type: "string" as const },
     db: { type: "string" as const },
+    "api-key": { type: "string" as const },
     json: { type: "boolean" as const, default: false },
     compact: { type: "boolean" as const, default: false },
     flat: { type: "boolean" as const, default: false },
@@ -591,6 +629,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     uiEndpoint: values["ui-endpoint"],
     project: values.project,
     dbPath: values.db,
+    apiKey: values["api-key"],
   };
   const config = Config.load(configOptions);
 
