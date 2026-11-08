@@ -24,7 +24,7 @@
   * Cycle guard in `assignBranches` eliminates stack overflow recursion on cyclic trace graphs.
   * Robust topological sorting with microsecond tie-breaking across concurrent multi-agent turns.
   * **Honest edges**: agents started by one message are siblings; a reply to an agent's own message is linked as `INFERRED` (and `AMBIGUOUS_PARENT` names the other candidates); only `REPLY_TO` is exact.
-* **Buzz-aware turns**: reads the Buzz envelope in the prompt (who asked what, parent, root) and the text each turn *posted*, so previews show the question and the answer, not metadata.
+* **Buzz-aware turns**: reads the Buzz envelope in the prompt (who asked what, parent, root) and the text each turn *posted*, so previews show the question and the answer, not metadata. A message steered into a running turn (it starts no trace) is found from the turn's reply calls and shown as `msgs: 2`.
 * **Cost & context per call**: cost and cache use per turn and thread; a turn's prompt tokens are summed over its model calls, so buzz-trace estimates the context of *one* call (tool steps + 1) and warns on `CONTEXT_GROWTH` round after round.
 * **Automated Diagnostic Intelligence**:
   * Detects `context canceled` premature turn terminations.

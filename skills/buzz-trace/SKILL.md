@@ -233,6 +233,7 @@ Read `turns[].parent` (the turn it continues), `turns[].edge` (present only when
 | "`tokens` is 170k, so the context is nearly full." | `tokens` is summed over the turn's model calls; 3 calls of 57k read as 170k. | Read `ctx`. TOKEN_BLOAT and TOKEN_INFLATION already judge per call. |
 | "`NOT_FOUND`, so the thread never ran." | It only says the places searched had nothing (a stale local copy, a wrong `--project`). | Read `tried`; pass `--db <live copy>` or `--project <community>`. |
 | "No `edge` on a turn, so its parent is a guess." | The opposite: no `edge` is the exact link; `inferred` is the guess. | Check `AMBIGUOUS_PARENT` before relying on an inferred parent. |
+| "I sent 4 messages but see 3 turns, so one was lost." | With steering, a message sent while the agent is still answering is handled by the running turn and starts no trace. | Look for `msgs: 2` in compact output (`steered_event_ids` in `inspect --json`): that turn handled both. |
 | "Two agents answered the same message, so one replied to the other." | They were started by the same message: siblings. | Trust `parent`, not the order of the turns. |
 
 ---

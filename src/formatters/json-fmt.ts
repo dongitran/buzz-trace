@@ -71,6 +71,8 @@ export class JsonRenderer {
             agent: t.agentName,
             // The turn this one continues. `edge` is only said when that link is not exact (the default).
             ...(t.parentTurnIndex ? { parent: t.parentTurnIndex } : {}),
+            // With steering a message that arrives mid-turn is answered by the running turn: say how many it handled.
+            ...(t.steeredEventIds && t.steeredEventIds.length > 0 ? { msgs: 1 + t.steeredEventIds.length } : {}),
             ...(t.parentTurnIndex && t.parentEdgeType && t.parentEdgeType !== "REPLY_TO"
               ? { edge: t.parentEdgeType.toLowerCase() }
               : {}),

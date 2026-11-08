@@ -5,6 +5,16 @@ All notable changes to `buzz-trace` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-11-08
+
+### Fixed
+- **Steered messages.** With `turn_handling: steer`, a message that arrives while an agent's turn is running is injected
+  into that turn and starts no trace of its own: it looked like a missing turn, and a later reply to it could not be
+  linked. The turn's `reply` calls name the messages they answered (`reply_to`), so those are read as
+  `steered_event_ids` (full JSON), `msgs` (compact) and `Handled` (terminal), and a reply to one of them is an exact child
+  of the turn that handled it. Seen live in ba `#consultant`: one turn of Ann answered two messages sent 12 s apart.
+  Answers to the thread root, to the trigger's parent or to another turn's trigger are not counted as steering.
+
 ## [0.2.0] - 2026-11-08
 
 Found by running buzz-trace against real multi-round and multi-agent Buzz threads of the `ba` community (one agent over
