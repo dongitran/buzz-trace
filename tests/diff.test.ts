@@ -13,6 +13,8 @@ describe("TraceDiffer (buzz-trace diff)", () => {
     completionTokens: overrides.completionTokens ?? 200,
     reasoningTokens: overrides.reasoningTokens ?? 50,
     totalTokens: overrides.totalTokens ?? 750,
+    modelCalls: overrides.modelCalls,
+    contextPerCall: overrides.contextPerCall,
     statusCode: overrides.statusCode ?? "OK",
     statusMessage: overrides.statusMessage ?? null,
     promptPreview: overrides.promptPreview ?? "User question",
@@ -29,6 +31,17 @@ describe("TraceDiffer (buzz-trace diff)", () => {
       },
     ],
     spans: [],
+  });
+
+  it("compares the context of one model call, not only the totals summed over a turn's calls", () => {
+    // Round 1: 3 calls of ~23k (69k summed); round 4: 2 calls of ~72k (145k summed). The summed figure doubles; so does the
+    // context, three times over.
+    const a = createMockTurn({ turnIndex: 1, promptTokens: 69177, modelCalls: 3, contextPerCall: 23059 });
+    const b = createMockTurn({ turnIndex: 4, promptTokens: 144581, modelCalls: 2, contextPerCall: 72291 });
+    const result = new TraceDiffer().diff(a, b);
+    expect(result.diff.context_per_call).toEqual({ a: 23059, b: 72291, delta_tokens: 49232, pct_change: 213.5 });
+    expect(result.diff.model_calls).toEqual({ a: 3, b: 2, delta_count: -1 });
+    expect(TraceDiffer.renderTerminal(result, false)).toContain("Context/call:      23,059 -> 72,291");
   });
 
   it("calculates exact metrics and delta when comparing two turns", () => {

@@ -172,7 +172,7 @@ describe("Subagent 2.2: Branching Edge Cases & Relayed Resolution", () => {
       expect(telemetry.turns[1].depth).toBe(1);
     });
 
-    it("falls back to root tag when reply_to points to an unindexed assistant response event", () => {
+    it("infers the parent when reply_to points to an unindexed assistant response event inside the thread", () => {
       // Turn 1 event is ev-turn1-prompt. In Turn 1 the agent sent ev-turn1-agent-reply (not an agent_turn event ID).
       // Turn 2 reply_to is ev-turn1-agent-reply, but root_id is ev-turn1-prompt.
       const spans: SpanNode[] = [
@@ -199,12 +199,14 @@ describe("Subagent 2.2: Branching Edge Cases & Relayed Resolution", () => {
       expect(telemetry.turns[0].turnIndex).toBe(1);
       expect(telemetry.turns[0].depth).toBe(0);
 
-      // Successfully resolved via root tag fallback
+      // The reply answers the agent's own response: the latest turn of the thread that had finished wrote it. No
+      // message ties the two exactly, so the edge says it was inferred.
       expect(telemetry.turns[1].turnIndex).toBe(2);
       expect(telemetry.turns[1].parentTurnIndex).toBe(1);
+      expect(telemetry.turns[1].parentEdgeType).toBe("INFERRED");
       expect(telemetry.turns[1].depth).toBe(1);
       expect(telemetry.dag?.edges).toEqual([
-        { fromTurnIndex: 1, toTurnIndex: 2, type: "REPLY_TO" },
+        { fromTurnIndex: 1, toTurnIndex: 2, type: "INFERRED" },
       ]);
     });
 

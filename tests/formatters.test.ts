@@ -83,7 +83,8 @@ describe("Formatters", () => {
     const renderer = new MarkdownRenderer();
     const md = renderer.render(telemetry);
     expect(md).toContain("# Thread Execution Report: `test-thread-abc`");
-    expect(md).toContain("| **1** | `phoenix-twin` | `gemini-3.8-flash` |");
+    // A root turn has no parent: the Parent column says so with a dash.
+    expect(md).toContain("| **1** | `phoenix-twin` | — | `gemini-3.8-flash` |");
     expect(md).toContain("### Turn 1 (phoenix-twin)");
     expect(md).toContain("`run_command`");
   });

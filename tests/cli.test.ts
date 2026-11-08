@@ -1,3 +1,4 @@
+import * as fs from "node:fs";
 import { describe, it, expect, vi } from "vitest";
 import { main } from "../src/cli.js";
 import { PhoenixClient } from "../src/clients/phoenix-api.js";
@@ -8,7 +9,8 @@ describe("CLI", () => {
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     const code = await main(["--version"]);
     expect(code).toBe(0);
-    expect(logSpy).toHaveBeenCalledWith(expect.stringMatching(/buzz-trace 0\.1\.\d+/));
+    const pkg = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf-8")) as { version: string };
+    expect(logSpy).toHaveBeenCalledWith(`buzz-trace ${pkg.version}`);
     logSpy.mockRestore();
   });
 

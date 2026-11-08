@@ -4,6 +4,7 @@
  */
 
 import { ThreadTelemetry } from "../models.js";
+import { edgeLabel, formatCost } from "./edge-label.js";
 
 export class TerminalRenderer {
   readonly useColors: boolean;
@@ -71,10 +72,24 @@ export class TerminalRenderer {
     if (t.phoenixSessionUrl) {
       lines.push(`  ${this.bold("Phoenix UI  :")} ${this.cyan(t.phoenixSessionUrl)}`);
     }
+    if (t.source) {
+      lines.push(`  ${this.bold("Source      :")} ${t.source}`);
+    }
     lines.push(
       `  ${this.bold("Total Tokens:")} ${this.yellow(t.totalTokens.toLocaleString())} ` +
         `(Prompt: ${t.totalPromptTokens.toLocaleString()} · Completion: ${t.totalCompletionTokens.toLocaleString()})`,
     );
+    const cost = formatCost(t.totalCostUsd);
+    if (cost) {
+      lines.push(`  ${this.bold("Total Cost  :")} ${this.yellow(cost)}`);
+    }
+    const cacheRead = t.turns.reduce((acc, turn) => acc + (turn.cacheReadTokens ?? 0), 0);
+    const cacheWrite = t.turns.reduce((acc, turn) => acc + (turn.cacheWriteTokens ?? 0), 0);
+    if (cacheRead > 0 || cacheWrite > 0) {
+      lines.push(
+        `  ${this.bold("Cache       :")} ${cacheRead.toLocaleString()} read · ${cacheWrite.toLocaleString()} written`,
+      );
+    }
     lines.push(
       `  ${this.bold("Total Turns :")} ${t.turns.length} turns · ` +
         `${this.bold("Duration:")} ${(t.totalDurationMs / 1000).toFixed(2)}s`,
@@ -105,6 +120,13 @@ export class TerminalRenderer {
 
     if (t.turns.length === 0) {
       lines.push(this.dim("  (No agent turns recorded for this thread)"));
+      if (t.sourcesTried.length > 0) {
+        lines.push("");
+        lines.push(`  ${this.bold("Looked in:")}`);
+        for (const place of t.sourcesTried) {
+          lines.push(`    - ${place}`);
+        }
+      }
       lines.push("");
       return lines.join("\n");
     }
@@ -127,11 +149,22 @@ export class TerminalRenderer {
       if (turn.nostrEventId) {
         lines.push(`  ${this.dim("│")}  ${this.bold("Event ID :")} ${turn.nostrEventId}`);
       }
+      if (turn.senderName) {
+        lines.push(`  ${this.dim("│")}  ${this.bold("From     :")} ${turn.senderName}`);
+      }
       if (turn.parentTurnIndex) {
         const branchTag = turn.branchId && turn.branchId !== "main" ? ` [${turn.branchId}]` : "";
-        lines.push(`  ${this.dim("│")}  ${this.bold("Reply To :")} Turn ${turn.parentTurnIndex}${branchTag}`);
+        const how = edgeLabel(turn);
+        lines.push(
+          `  ${this.dim("│")}  ${this.bold("Reply To :")} Turn ${turn.parentTurnIndex}${how ? ` (${how})` : ""}${branchTag}`,
+        );
       }
       lines.push(`  ${this.dim("│")}  ${this.bold("Model    :")} ${this.magenta(turn.modelName)}`);
+      if (turn.contextPerCall && turn.modelCalls) {
+        lines.push(
+          `  ${this.dim("│")}  ${this.bold("Context  :")} ~${turn.contextPerCall.toLocaleString()} per call × ~${turn.modelCalls} calls`,
+        );
+      }
 
       if (turn.promptPreview) {
         lines.push(`  ${this.dim("│")}  ${this.bold("Prompt   :")} "${turn.promptPreview}"`);
@@ -156,7 +189,9 @@ export class TerminalRenderer {
         lines.push(`  ${this.dim("│")}  ${this.bold("Tools    :")} ${this.dim("(none)")}`);
       }
 
-      if (turn.responsePreview && verbose) {
+      if (turn.postedTexts && turn.postedTexts.length > 0) {
+        lines.push(`  ${this.dim("│")}  ${this.bold("Posted   :")} "${turn.responsePreview}"`);
+      } else if (turn.responsePreview && verbose) {
         lines.push(`  ${this.dim("│")}  ${this.bold("Output   :")} "${turn.responsePreview}"`);
       }
 

@@ -23,11 +23,14 @@
 * **Causal DAG & Branch Hardening**:
   * Cycle guard in `assignBranches` eliminates stack overflow recursion on cyclic trace graphs.
   * Robust topological sorting with microsecond tie-breaking across concurrent multi-agent turns.
+  * **Honest edges**: agents started by one message are siblings; a reply to an agent's own message is linked as `INFERRED` (and `AMBIGUOUS_PARENT` names the other candidates); only `REPLY_TO` is exact.
+* **Buzz-aware turns**: reads the Buzz envelope in the prompt (who asked what, parent, root) and the text each turn *posted*, so previews show the question and the answer, not metadata.
+* **Cost & context per call**: cost and cache use per turn and thread; a turn's prompt tokens are summed over its model calls, so buzz-trace estimates the context of *one* call (tool steps + 1) and warns on `CONTEXT_GROWTH` round after round.
 * **Automated Diagnostic Intelligence**:
   * Detects `context canceled` premature turn terminations.
   * Flags **`INVALID_DURATION`** anomalies from monotonic clock jumps, with automatic non-negative duration clamping.
   * Identifies tool execution failures, stderr errors, and `CAUSAL_OVERLAP`.
-  * Flags **Tool Loops** (identical consecutive tool invocations) and **Token Bloat** (>150k context).
+  * Flags **Tool Loops** (identical consecutive tool invocations), **Token Bloat** (>150k tokens in one model call) and **Context Growth** (an agent's context per call doubling over a thread).
 * **Multiple Output Modalities**:
   * **Terminal**: Clean ANSI color formatting, trees, and badges for human engineers.
   * **AI JSON (`--json`)**: Compact, structured JSON optimized for LLM prompts and autonomous subagents.
@@ -69,6 +72,14 @@ When running locally on the Docker host:
 ```bash
 buzz-trace inspect a519f713... --db /root/.phoenix/phoenix.db
 ```
+
+A Phoenix with authentication on (`PHOENIX_ENABLE_AUTH=true`) answers the REST API only with an API key:
+```bash
+PHOENIX_API_KEY=... buzz-trace query a519f713... --endpoint https://phoenix.example.com --project ba
+```
+Without a key and without `--db`, buzz-trace stops with exit code 2 and says so (it never reports an auth failure as
+`NOT_FOUND`). A thread that is really nowhere is `NOT_FOUND` and lists in `tried` every place it looked, with the age of
+any SQLite file: an auto-detected `~/.phoenix/phoenix.db` can be a stale copy.
 
 ### 3. AI Agent Self-Reflection & Compact Query Mode (<200 tokens)
 Designed specifically for LLM context preservation and subagent evaluation:
@@ -152,6 +163,7 @@ buzz-trace sessions --project mobile --limit 10
 | `PHOENIX_ENDPOINT` | `--endpoint` | `http://localhost:6006` | Arize Phoenix base URL |
 | `PHOENIX_PROJECT` | `--project` | `mobile` | Arize Phoenix project name |
 | `PHOENIX_DB_PATH` | `--db` | Auto-detected | Path to local `phoenix.db` |
+| `PHOENIX_API_KEY` | `--api-key` | none | Phoenix API key (Bearer), for a server with authentication on |
 | `NO_COLOR` | `--no-color` | `0` | Disables ANSI terminal coloring |
 
 ---

@@ -5,6 +5,43 @@ All notable changes to `buzz-trace` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-11-08
+
+Found by running buzz-trace against real multi-round and multi-agent Buzz threads of the `ba` community (one agent over
+four rounds, a hand-off Kent → Ann → Kent → James, and one message that started two agents), scored against what was
+actually sent: parent links were right for 8 of 11 turns, now 10 of 11, and the 11th is flagged as ambiguous.
+
+### Added
+- **Buzz envelope reader** (`parseBuzzEnvelope`): turns' sender, the message the person wrote, its parent and thread root
+  are read from the prompt buzz-acp hands the agent, so `prompt` shows the question, not `[Buzz event: @mention] Event ID: …`.
+- **Honest thread edges**: `REPLY_TO` (exact), `INFERRED` (the person answered an agent's own message, which no turn
+  started from: the parent is the latest finished turn of the thread), `THREAD_ROOT`. `AMBIGUOUS_PARENT` names the other
+  turns an inferred parent could equally be. Dashed arrows in the Markdown diagram.
+- **What each turn posted**: the text of the `reply`/`send` tool call is the turn's response (not the model's closing aside).
+  `nostr.posted_event_id` on a span, when telemetry records it, makes the link exact.
+- **Cost and cache**: `cost_usd` per turn and per thread (counted once), cache read/write tokens.
+- **Context per model call** (`model_calls`, `context_per_call`, `calls`/`ctx` in compact): a turn's prompt tokens are
+  summed over its model calls, so they are divided by the number of calls, estimated as tool steps + 1.
+  Matched the harness's own count on 15 of 15 real turns. `diff` compares it too.
+- **`CONTEXT_GROWTH` anomaly**: an agent whose context per call grows 2x and by 30k tokens over three or more turns.
+- **`--api-key` / `PHOENIX_API_KEY`**: Bearer token for a Phoenix with authentication on.
+- **Source reporting**: `source` of a found thread; `tried` (every place looked in, with the SQLite file's write time)
+  for a thread that was not found.
+
+### Fixed
+- Agents started by the same message were chained as if one replied to the other (false `CLOCK_SKEW`).
+- A reply to an agent's own message was attached to the thread root instead of the turn before it.
+- `TOKEN_BLOAT` and `TOKEN_INFLATION` judged the summed tokens of a turn as if they were one context.
+- A Phoenix that answered 401 was reported as `NOT_FOUND` with exit code 0; it is now an error (exit 2) that says what to set.
+- A stale auto-detected `~/.phoenix/phoenix.db` was read silently; the source and its age are now reported.
+- `sessions` listed other projects' sessions, always showed 0 tokens, and counted `--limit` in traces.
+- `query` dropped cost, source and places tried when it filtered; Markdown section numbers skipped when there were no anomalies.
+
+### Changed
+- Compact JSON adds `parent`, `edge` (only when the link is not exact), `calls`/`ctx` (only with more than one call) and a
+  thread-level `cost_usd`. Full JSON adds `event_id`, `reply_to`, `root_id`, `sender`, `parent_edge`, `posted`, `tokens.cache_*`.
+- The Markdown timeline has Parent and Cost columns.
+
 ## [0.1.7] - 2026-11-01
 
 ### Added

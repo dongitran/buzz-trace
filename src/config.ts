@@ -13,6 +13,8 @@ export interface ConfigOptions {
   dbPath?: string;
   timeout?: number;
   showSecrets?: boolean;
+  /** A Phoenix API key, for a server that has authentication on. Falls back to PHOENIX_API_KEY. */
+  apiKey?: string;
 }
 
 export class Config {
@@ -22,6 +24,8 @@ export class Config {
   dbPath: string | null;
   timeout: number;
   showSecrets: boolean;
+  /** Never enumerable, so serializing or logging a Config cannot print it. */
+  declare readonly apiKey: string | null;
 
   constructor(options: ConfigOptions = {}) {
     let resolvedEndpoint =
@@ -51,6 +55,10 @@ export class Config {
     this.project = options.project || process.env.PHOENIX_PROJECT || "mobile";
     this.timeout = options.timeout ?? 10000;
     this.showSecrets = options.showSecrets ?? false;
+    Object.defineProperty(this, "apiKey", {
+      value: options.apiKey || process.env.PHOENIX_API_KEY || null,
+      enumerable: false,
+    });
 
     // Resolve SQLite DB path
     let resolvedDb = options.dbPath || process.env.PHOENIX_DB_PATH || null;

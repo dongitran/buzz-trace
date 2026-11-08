@@ -49,6 +49,12 @@ export class JsonRenderer {
         ...(!options.flat && telemetry.phoenixSessionUrl ? { session_url: telemetry.phoenixSessionUrl } : {}),
         total_turns: telemetry.totalTurns,
         filtered_turns: telemetry.turns.length,
+        ...(telemetry.status === "NOT_FOUND" && telemetry.sourcesTried.length > 0
+          ? { tried: telemetry.sourcesTried }
+          : {}),
+        ...(telemetry.totalCostUsd !== null && telemetry.totalCostUsd !== undefined
+          ? { cost_usd: Number(telemetry.totalCostUsd.toFixed(4)) }
+          : {}),
         ...(compactAnomalies.length > 0
           ? {
               anomalies: compactAnomalies.map((a) => ({
@@ -63,9 +69,18 @@ export class JsonRenderer {
           return {
             turn: t.turnIndex,
             agent: t.agentName,
+            // The turn this one continues. `edge` is only said when that link is not exact (the default).
+            ...(t.parentTurnIndex ? { parent: t.parentTurnIndex } : {}),
+            ...(t.parentTurnIndex && t.parentEdgeType && t.parentEdgeType !== "REPLY_TO"
+              ? { edge: t.parentEdgeType.toLowerCase() }
+              : {}),
             status: t.statusCode,
             dur_s: Number((t.durationMs / 1000).toFixed(1)),
             tokens: t.totalTokens,
+            // Tokens are summed over the turn's model calls; with more than one call, say how big one call's context was.
+            ...(t.modelCalls && t.modelCalls > 1 && t.contextPerCall
+              ? { calls: t.modelCalls, ctx: t.contextPerCall }
+              : {}),
             ...(!options.flat && t.traceUrl ? { trace_url: t.traceUrl } : {}),
             ...(hasError && t.statusMessage ? { error: t.statusMessage } : {}),
             ...(t.promptPreview && !t.tools.some((tool) => tool.inputSummary === t.promptPreview)
