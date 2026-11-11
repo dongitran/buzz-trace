@@ -380,6 +380,7 @@ export function restFromNode(span: import("../../src/models.js").SpanNode, proje
     start_time: (span.startTime ?? new Date(0)).toISOString().replace("Z", "+00:00"),
     end_time: (span.endTime ?? span.startTime ?? new Date(0)).toISOString().replace("Z", "+00:00"),
     status_code: span.statusCode,
+    ...(span.statusMessage ? { status_message: span.statusMessage } : {}),
     attributes: Object.fromEntries(Object.entries(span.attributes).filter(([, v]) => v !== undefined)),
     events: span.events.map((e) => ({ name: e.name, timestamp: (e.time ?? new Date(0)).toISOString().replace("Z", "+00:00"), attributes: e.attributes })),
   };

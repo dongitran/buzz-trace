@@ -24,6 +24,7 @@
   * Cycle guard in `assignBranches` eliminates stack overflow recursion on cyclic trace graphs.
   * Robust topological sorting with microsecond tie-breaking across concurrent multi-agent turns.
   * **Honest edges**: agents started by one message are siblings. `REPLY_TO` is exact (the message started a turn, was taken into one, or a reply span recorded it). `INFERRED` names a turn only when it is the one turn that could have posted the parent message. `AMBIGUOUS` lists the candidates and picks none.
+* **The whole conversation, nothing cut**: `buzz-trace transcript` gives every request and response of a thread, whole and in the order they ran, including what each tool *returned* (`inspect` and `query` keep 80 characters of a tool's input and never read its output). `--dialogue` gives only who said what: the messages that started each turn, what the agent posted, and, in a huddle, what people said and what the agent said back, with each time it was cut off.
 * **Buzz-aware turns**: reads the Buzz envelope in the prompt (who asked what, parent, root) and the text each turn *posted*, so previews show the question and the answer, not metadata.
 * **Cost & context per call**: cost and cache use per turn and thread; a turn's prompt tokens are summed over its model calls, so buzz-trace estimates the context of *one* call (tool steps + 1) and warns on `CONTEXT_GROWTH` round after round.
 * **Automated Diagnostic Intelligence**:
@@ -162,6 +163,53 @@ buzz-trace watch a519f713... --interval 2.0
 buzz-trace sessions --limit 10
 ```
 
+### 10. Full Transcript: Every Request and Response, Whole (`buzz-trace transcript`)
+`inspect` and `query` keep 80 characters of a tool's input and never read what the tool returned. `transcript` reads it all from the spans Phoenix holds: for each turn, the message that started it, then every step in the order it ran with its **whole request and whole response**, and the text the turn ended with.
+
+```bash
+# Every step of every turn, whole
+buzz-trace transcript a519f713...
+
+# Only the conversation: what people said, what the agent said and posted (a huddle too)
+buzz-trace transcript a519f713... --dialogue
+
+# One turn, some tools, only what failed. Steps keep the number they have in the whole turn.
+buzz-trace transcript a519f713... --turn 2
+buzz-trace transcript a519f713... --tool meeting_speak,knowledge_search
+buzz-trace transcript a519f713... --failures
+
+# Exact data for a program (--flat: one line), a report for a merge request, a line per model call and the whole prompt
+buzz-trace transcript a519f713... --dialogue --json
+buzz-trace transcript a519f713... --markdown > transcript.md
+buzz-trace transcript a519f713... --verbose
+```
+
+`--turn`, `--last` and `--agent` choose turns (as in `query`); `--tool` (comma-separated, a part of a name is enough) and `--failures` choose steps and so do not apply to `--dialogue`, which refuses them. `--tool-input` is refused too: an answer to another question would look like the answer.
+
+A step is a tool call (`✓`/`✗`, how long it took, which model call asked for it), the words the model wrote, or a message steered into the running turn. A tool's request and response are shown as the runtime recorded them: JSON as `key: value` lines with the text unescaped (a message with quotes and line breaks stays a message), anything else as it is. `--json` has the exact values.
+
+The dialogue of a huddle is read from the meeting gate's `meeting_wait` (`heard[]`: who said what, and when into the call) and `meeting_speak` (what the agent said, and whether it was spoken to the end):
+
+```
+  09:14:28.257Z  Alex  · call 00:11 · mention
+      Hi. Kent.
+  09:14:29.707Z  Kent Twin  · said in the call · cut off by Alex after “Hi”
+      Hi, this is Kent Twin. I'm here and listening.
+  09:14:40.793Z  Alex  · call 00:24 · mention
+      Can you explain a phantom assembly?
+```
+
+#### Where the telemetry holds less than happened
+The transcript says so, in words, and never fills a gap:
+
+* **A response the runtime cut.** Some runtimes record only the first few KB of a long output. The span says how many bytes the tool returned (`tool.output_bytes`); when fewer were recorded the step reads `response cut by the runtime: recorded 8,207 of 12,098 bytes` (`response_truncated`, `response_recorded_bytes`, `response_returned_bytes` in JSON).
+* **A turn with no `agent_turn` span.** When the agent's process ends before the span does, Phoenix has the model and tool spans but never the root: the agent, the end and the closing text are not known, and the turn's times are those of the spans seen (`root_span: false`, `agent: null`). `inspect` and `query` name such a turn `phoenix-twin`, which is only their default.
+* **The same message starting a turn twice** (for example after a restart) is listed under both turns; the second says `same message as turn 1`.
+* The dialogue lists what a call recorded: a call that failed said nothing and is left out, and so is a steered message the turn ended before receiving. Other tools (`meeting_chat`, `meeting_transcript`) are in the steps only.
+
+#### Reading it safely
+The transcript prints what tools and web pages returned, whole. Phoenix is not a vault: whatever a tool printed (a token, a password) is in it, so treat the output as sensitive. Control characters (an escape sequence that clears the screen or sets the window title) are shown as `\x1b` in the terminal and Markdown forms instead of being sent to your terminal; `--json` keeps the exact text. The output is not token-budgeted: for an LLM, narrow it first (`--dialogue`, `--turn`, `--tool`, `--last`).
+
 ---
 
 ## 🧾 Which Turn Posted a Message?
@@ -288,6 +336,27 @@ Compact output (`--compact --json`) adds, only when they apply: `parent_msg` and
 
 ---
 
+## 🧾 Transcript JSON (0.5)
+
+`buzz-trace transcript <thread_id> --json` (`--flat`: one line). Times are ISO 8601 in UTC. Keys are always present (`tried` appears only for a thread that was not found); `null` means the trace does not say.
+
+| Field | Meaning |
+| :--- | :--- |
+| `view` | `steps` or `dialogue` |
+| `total_turns`, `shown_turns` | turns in the thread, and turns left after `--turn`, `--last`, `--agent` |
+| `turns[].root_span` | false: no `agent_turn` span was exported; `agent` and `output` are then null and the times are those of the spans seen |
+| `turns[].request` | `{ from, message, prompt }`: who wrote the message that started the turn, the message, and the whole prompt the agent was handed |
+| `turns[].output` | the closing text of the turn (its root span's `output.value`) |
+| `turns[].steps[].type` | `tool`, `assistant` (words the model wrote), `steer` (a message steered into the turn), `model` (a model call, with `--verbose`) |
+| `steps[].seq` | position in the whole turn; a filter drops steps but does not renumber the others |
+| tool step | `name`, `call_id`, `model_call` (the model call that asked for it), `start_time`, `end_time`, `duration_ms`, `status`, `error`, `request`, `response`, `posted` (`{ event_id, reply_to }` for a call that posted to the thread) |
+| `request`, `response` | the JSON value when the recorded text is JSON, else the text; `null` when nothing was recorded |
+| `response_truncated`, `response_recorded_bytes`, `response_returned_bytes` | the runtime recorded fewer bytes of the response than the tool returned (the latter is null when it did not) |
+| `lines[]` (dialogue) | `turn`, `time`, `direction` (`in`: received, `out`: said or posted), `channel` (`meeting`, `thread`), `via`, `speaker`, `text`, `offset` (into the call), `reason`, `event_id`, `outcome` (`complete`, `interrupted`, `not_spoken`, `async`, `unknown`), `interrupted_by`, `spoken` (the part spoken before the cut), `result` (the gate's own answer) |
+| `counts` (dialogue) | `{ in, out }` |
+
+---
+
 ## ⚙️ Configuration & Environment Variables
 
 | Variable | CLI Flag | Default | Description |
@@ -326,6 +395,7 @@ Compact output (`--compact --json`) adds, only when they apply: `parent_msg` and
  │  • One turn per trace; chronological multi-agent sequence     │
  │  • Posted ids, steered messages, parent message per turn      │
  │  • Candidates when the poster was not recorded                │
+ │  • Transcript: whole request/response per step, dialogue      │
  │  • Evaluates anomaly rules (cancellations, loops, bloat)      │
  └───────────────────────────────┬───────────────────────────────┘
                                  ▼

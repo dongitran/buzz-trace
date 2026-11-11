@@ -381,11 +381,28 @@ function postOf(toolName: string, attrs: Record<string, unknown>, annotations?: 
 }
 
 /** A span of a tool call: named `tool:…`, or a tool/internal span that carries `tool.name`. */
-function isToolCall(span: SpanNode): boolean {
+export function isToolCall(span: SpanNode): boolean {
   return span.name.startsWith("tool:") || ((span.spanKind === "TOOL" || span.spanKind === "SPAN_KIND_INTERNAL") && "tool.name" in span.attributes);
 }
 
-const toolNameOf = (span: SpanNode): string => (span.attributes["tool.name"] as string) || span.name.replace(/^tool:/, "");
+export const toolNameOf = (span: SpanNode): string => (span.attributes["tool.name"] as string) || span.name.replace(/^tool:/, "");
+
+/** The span that stands for a whole turn: its `agent_turn` span, else any span that has no parent. Undefined when the trace holds none. */
+export function findRootSpan(spans: SpanNode[]): SpanNode | undefined {
+  return spans.find((s) => s.name === "agent_turn" || s.parentId === null);
+}
+
+/** The agent a root span names, by the attributes runtimes write it in; null when it names none. */
+export function agentNameOf(attrs: Record<string, unknown>): string | null {
+  return (
+    (attrs["agent.id"] as string) ||
+    (attrs["agent.name"] as string) ||
+    (attrs["service.name"] as string) ||
+    (attrs["agent_name"] as string) ||
+    (attrs["community.agent"] as string) ||
+    null
+  );
+}
 
 /**
  * Whether a span may get its posted id from a span annotation: a call of a tool that posts to the thread (see postOf), that did
@@ -612,7 +629,7 @@ export class ThreadAggregator {
 
   private buildTurn(traceId: string, spans: SpanNode[]): AgentTurn {
     // Find root span
-    let rootSpan: SpanNode | undefined = spans.find((s) => s.name === "agent_turn" || s.parentId === null);
+    let rootSpan: SpanNode | undefined = findRootSpan(spans);
     if (!rootSpan && spans.length > 0) {
       rootSpan = spans[0];
     }
@@ -633,13 +650,7 @@ export class ThreadAggregator {
 
     if (rootSpan) {
       const attrs = rootSpan.attributes;
-      agentName =
-        (attrs["agent.id"] as string) ||
-        (attrs["agent.name"] as string) ||
-        (attrs["service.name"] as string) ||
-        (attrs["agent_name"] as string) ||
-        (attrs["community.agent"] as string) ||
-        "phoenix-twin";
+      agentName = agentNameOf(attrs) || "phoenix-twin";
 
       envelope = parseBuzzEnvelope(attrs["input.value"] as string | undefined);
 

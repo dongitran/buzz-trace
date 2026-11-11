@@ -6,3 +6,4 @@ export * from "./terminal.js";
 export * from "./json-fmt.js";
 export * from "./compact-fmt.js";
 export * from "./markdown.js";
+export * from "./transcript-fmt.js";

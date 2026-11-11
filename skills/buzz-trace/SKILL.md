@@ -1,6 +1,6 @@
 ---
 name: buzz-trace
-description: Use when inspecting, debugging, or querying multi-agent Nostr threads, tool execution logs, or distributed telemetry traces with buzz-trace and Arize Phoenix
+description: Use when inspecting, debugging, or querying multi-agent Nostr threads, tool execution logs, or distributed telemetry traces with buzz-trace and Arize Phoenix, or when you need the full text of what a thread asked and answered (every tool's whole request and response, who said what in a huddle)
 ---
 
 # buzz-trace
@@ -23,6 +23,7 @@ Distributed thread observability, AI query engine, and telemetry diagnostic CLI 
 4. **Token-Budgeted Context Protection**:
    - Never load raw full-thread timelines into an LLM agent context window.
    - Always use `--compact --json` (add `--flat` for single-line zero-whitespace JSON) combined with filters (`--last 1`, `--failures`, `--turn N`) to keep query payloads under 200 tokens.
+   - `transcript` is the one command that is not token-budgeted: it gives the text of every request and response whole (a 25-minute huddle is ~165 KB as steps, ~35 KB as dialogue). Narrow it first (`--dialogue`, `--turn N`, `--tool a,b`, `--last N`), and treat what it prints as sensitive: a tool may have returned a secret.
 
 ---
 
@@ -41,6 +42,8 @@ Distributed thread observability, AI query engine, and telemetry diagnostic CLI 
 | Thread cost and who answered whom | `buzz-trace query <thread_id> --compact --json --flat` (`cost_usd`, `parent`, `edge`, `candidates`) | ~250 tokens a turn; add `--last N` |
 | Which turn posted message X, what each turn posted | `buzz-trace inspect <thread_id>` (`Reply To`, `Posted`), or `--json` (`parent_message`, `posts`) | Terminal UI |
 | Messages steered into a running turn | `buzz-trace query <thread_id> --compact --json --flat` (`msgs`, `steered`, `steering`) | same |
+| Who said what, in order (a huddle, a thread) | `buzz-trace transcript <thread_id> --dialogue [--json --flat]` | whole text: ~100 tokens a line |
+| Whole request and response of some tools in a turn | `buzz-trace transcript <thread_id> --turn <N> --tool <a,b> [--json --flat]` | whole text: filter first |
 | Phoenix with authentication on | `PHOENIX_API_KEY=…` (or `PHOENIX_EMAIL` + `PHOENIX_PASSWORD`) with `PHOENIX_URL=…` set | same |
 | Full human-readable terminal view | `buzz-trace inspect <thread_id> [--project <community>]` | Terminal UI |
 | Watch live thread execution | `buzz-trace watch <thread_id> [--interval 2.0]` | Interactive |
@@ -259,6 +262,23 @@ The attribute wins over the annotation, and the annotation over `event_id <hex>`
 
 `status: "NOT_FOUND"` is an answer about the places that were searched, not about the thread. Read `tried`: it says which projects were looked in, and where the session is if it is in another project. If Phoenix answered 401 or 403, buzz-trace exits with code 2 and names `PHOENIX_API_KEY` and `PHOENIX_EMAIL`/`PHOENIX_PASSWORD`; it never reports that as `NOT_FOUND`. A sign-in lasts ten minutes on a default Phoenix; for repeated runs use an API key.
 
+### 12. Read What Was Asked and Answered, Whole (`buzz-trace transcript`)
+
+Every other command caps a tool's input at 80 characters and never reads its output. When the text itself is what you need (what a person said in a huddle, what a tool returned, what the agent said back), use the transcript, and narrow it first.
+
+```bash
+buzz-trace transcript <thread_id> --dialogue                 # who said what, in order: messages, huddle speech, what the agent posted
+buzz-trace transcript <thread_id> --dialogue --json --flat   # the same, for a program
+buzz-trace transcript <thread_id> --turn <N> --tool <a,b>    # the whole request and response of some tools in one turn
+buzz-trace transcript <thread_id> --failures                 # only the steps that failed, with their whole error output
+```
+
+Read it like this:
+- `steps[].request` / `.response` are the JSON value when the recorded text is JSON, else the text; `null` means the runtime recorded nothing. `seq` is the step's number in the whole turn, whatever the filter.
+- `response_truncated: true` means the runtime recorded only the start of a long output (`response_recorded_bytes` of `response_returned_bytes`). Do not conclude anything from the missing tail.
+- `root_span: false` (`agent: null`) means the turn's process ended before its `agent_turn` span did. The steps are real; the agent, the end and the closing text are not recorded. `query` and `inspect` call such a turn `phoenix-twin`, which is only their default.
+- In a dialogue, `outcome: "interrupted"` means the agent was cut off by `interrupted_by` after saying `spoken`; `text` is what it meant to say. A message that started two turns (a restart) is listed under both and says `same message as turn N`.
+
 ## Rationalization Table & Traps
 
 | Temptation / Rationalization | Why It Fails | What To Do Instead |
@@ -266,7 +286,7 @@ The attribute wins over the annotation, and the annotation over `event_id <hex>`
 | "I will run `buzz-trace inspect <id>` and parse everything myself." | Consumes 2,000+ tokens and clutters context window with ANSI escape codes and tables. | Use `buzz-trace query <id> --compact --json`. |
 | "I only need `--compact`, no need for `--json`." | `--compact` is specifically a modifier for `--json` in structured rendering. Plain text ignores it. | Always pair them: `--compact --json`. |
 | "Timestamps show Turn 2 started before Turn 1 finished, so the trace must be corrupted." | Distributed containers across hosts experience NTP clock jitter. | Trust the topological `reply_to` DAG built by `buzz-trace`, not wall-clock times. |
-| "I can query Phoenix REST API directly with curl." | Raw Phoenix span tables contain unaggregated low-level OTel JSON requiring complex session stitching. | Let `buzz-trace` aggregate spans, compute DAGs, and format metrics. |
+| "I can query Phoenix REST API directly with curl." | Raw Phoenix span tables contain unaggregated low-level OTel JSON requiring complex session stitching. | Let `buzz-trace` aggregate spans, compute DAGs, and format metrics. For the whole text of a tool's request or response, use `buzz-trace transcript`: it reads the same spans. |
 | "Command failed because project was not found." | A named `--project` that does not exist, or one the thread is not in. | Read `tried`: it lists the projects Phoenix has. Drop `--project` and buzz-trace finds the thread's project. |
 | "`CONTEXT_GROWTH` means the conversation got long." | Read its message: if most of the growth is "re-sent with every prompt", the agent's harness repeats a static block in each message, whatever the conversation says. | Check the prompt the agent's harness builds, not the thread. |
 | "`tokens` is 170k, so the context is nearly full." | `tokens` is summed over the turn's model calls; 3 calls of 57k read as 170k. | Read `ctx`. TOKEN_BLOAT and TOKEN_INFLATION already judge per call. |
@@ -278,6 +298,10 @@ The attribute wins over the annotation, and the annotation over `event_id <hex>`
 | "`Posted : id not recorded`, so the message was not posted." | The text and time of the reply call are in Phoenix; only the id of the message it created is not, unless the runtime records it. | Read the text of the post; the id needs `nostr.posted_event_id`. |
 | "I sent 4 messages but see 3 turns, so one was lost." | With steering, a message sent while the agent is still answering is handled by the running turn and starts no trace. | Look for `Handled : N messages (K steered)` / `msgs` in compact output. If the report says steered messages are not recorded, the trace cannot show them. |
 | "Two agents answered the same message, so one replied to the other." | They were started by the same message: siblings. | Trust `parent`, not the order of the turns. |
+| "I'll run `buzz-trace transcript <id>` to see what happened." | It prints everything, including what every tool returned (hundreds of KB for a long thread), and may show a secret a tool printed. | Start with `query --compact --json`; then `transcript` narrowed by `--turn`, `--tool`, `--dialogue` or `--last`. |
+| "`root_span: false` / `agent: null`, so the trace is broken or the agent is unknown." | The agent's process ended before its `agent_turn` span did (a restart, a crash): Phoenix has the steps but never the root. The steps are real. | Read the steps, and say that the agent and the end are not recorded. |
+| "`response_truncated`, so the tool failed or its data is wrong." | The runtime recorded only the start of a long output; the tool returned all of it (compare `response_recorded_bytes` with `response_returned_bytes`). | Do not infer from the missing tail. |
+| "`outcome: interrupted`, so the agent never said it." | It began to say it and was cut off. `spoken` is the part that was said; `text` is what it meant. | Quote `spoken` as said and `text` as intended. |
 
 ---
 

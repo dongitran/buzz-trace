@@ -7,3 +7,5 @@ export * from "./analyzer.js";
 export * from "./query.js";
 export * from "./differ.js";
 export * from "./context-summarizer.js";
+export * from "./transcript.js";
+export * from "./dialogue.js";
