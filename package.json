@@ -1,6 +1,6 @@
 {
   "name": "buzz-trace",
-  "version": "0.4.2",
+  "version": "0.5.0",
   "description": "Distributed Thread Observability & Diagnostic CLI for Multi-Agent Nostr Networks",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

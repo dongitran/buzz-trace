@@ -5,6 +5,48 @@ All notable changes to `buzz-trace` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-11-11
+
+`inspect` and `query` keep 80 characters of a tool's input and never read what the tool returned, so a conversation (a huddle, a
+long run of tool calls) could not be read from them. Phoenix holds all of it: a tool span carries the whole `input.value` and
+`output.value` its runtime recorded. buzz-trace now shows it, whole, in the order it ran. Read live: a 25-minute huddle of two
+turns, 134 tool calls, 59 things a person said.
+
+### Added
+- **`buzz-trace transcript <thread_id>`**: for each turn, the message that started it, then every step in the order it ran with its
+  whole request and whole response (a tool call, the words the model wrote, a steered message), and the text the turn ended with.
+  A tool call says how it ended, how long it took and which model call asked for it (`tool.call_id` matched to the model call's
+  `llm.output_messages…tool_calls`). Terminal, Markdown (`--markdown`) and JSON (`--json`, `--flat`) forms. JSON requests and
+  responses are the JSON value when the recorded text is JSON, else the text, else `null`.
+- **`--dialogue`**: only the conversation, in order. The message that started each turn and the steered ones, what the agent posted
+  to the thread and, in a huddle, what people said (`meeting_wait` `heard[]`: speaker, text, offset into the call, why it reached the
+  agent) and what the agent said (`meeting_speak`) with what became of it: `complete`, `interrupted` (by whom, and the part that was
+  spoken), `not_spoken`, `async`, or `unknown` with the gate's own answer kept.
+- **Filters**: `--turn`, `--last`, `--agent` (as in `query`); `--tool a,b` (steps of these tools, a part of a name is enough) and
+  `--failures` (failed steps). A step keeps the number it has in the whole turn. `--verbose` adds a line per model call and the whole
+  prompt. `--dialogue` refuses `--tool` and `--failures`, and `transcript` refuses `--tool-input`, `--turn abc` and `--last 0`
+  before Phoenix is asked: an answer to another question would look like the answer.
+- The transcript reads a thread with the requests the other commands make, and none more.
+
+### Rules
+- **Where the telemetry holds less than happened, the transcript says so.** A runtime may record only the start of a long output:
+  when `tool.output_bytes` is more than the bytes recorded, the step reads `response cut by the runtime: recorded 8,207 of 12,098
+  bytes` (`response_truncated`, `response_recorded_bytes`, `response_returned_bytes`). Six `knowledge_search` responses of the live
+  huddle were cut this way.
+- **A turn with no `agent_turn` span** (the process ended before the span did) has its model and tool spans but no root: the
+  transcript gives `root_span: false`, `agent: null`, no closing text, and the times of the spans seen. `inspect` and `query`
+  keep calling such a turn `phoenix-twin`, which is only their default.
+- A message that started two turns (a restart) is listed under both and says `same message as turn N`. A call that failed said
+  nothing, and a steered message the turn ended before receiving was not part of its conversation: neither is in the dialogue.
+- **Text is shown, not obeyed.** Recorded text can hold escape sequences that clear a screen or set a window title. The terminal and
+  Markdown forms show control characters and text-reordering characters as escapes (`\x1b`, `\u202e`) and read any line break as a
+  line break; the JSON form keeps the exact text.
+- The transcript is not token-budgeted. Narrow it before giving it to a model (README, skill).
+
+### Changed
+- `isToolCall`, `toolNameOf`, `findRootSpan` and `agentNameOf` are exported from the aggregator, so that the transcript applies the
+  rules the other commands apply. No change of behaviour.
+
 ## [0.4.2] - 2026-11-08
 
 A trace written before a runtime recorded `nostr.posted_event_id` holds no id for a posted message, and a span cannot be edited.

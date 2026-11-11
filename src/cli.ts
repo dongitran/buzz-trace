@@ -11,9 +11,9 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { PhoenixClient, type PhoenixSession } from "./clients/index.js";
 import { Config, ConfigOptions } from "./config.js";
-import { ThreadAggregator, AnomalyDetector, ThreadQueryEngine, TraceDiffer, ContextSummarizer } from "./engine/index.js";
+import { ThreadAggregator, AnomalyDetector, ThreadQueryEngine, TraceDiffer, ContextSummarizer, TranscriptBuilder, extractDialogue } from "./engine/index.js";
 import { createRequire } from "node:module";
-import { JsonRenderer, MarkdownRenderer, TerminalRenderer } from "./formatters/index.js";
+import { JsonRenderer, MarkdownRenderer, TerminalRenderer, TranscriptRenderer } from "./formatters/index.js";
 import { ThreadTelemetry } from "./models.js";
 
 const require = createRequire(import.meta.url);
@@ -33,6 +33,7 @@ COMMANDS:
   diff <trace1> <trace2> Compare two agent turns/traces (models, duration Δ, tokens Δ, tools)
   context <thread_id>   Adaptive context summarizer prioritizing intent, outcome & failed tools
   analyze <thread_id>   Perform automated diagnostic & anomaly detection on a thread
+  transcript <thread_id> Every request and response in order, whole: nothing cut (--dialogue: who said what)
   sessions              List recent active sessions and thread traces
   watch <thread_id>     Live monitor thread execution in real-time
   install-skill         Install buzz-trace skill to AI agent runtimes (~/.claude, ~/.agents)
@@ -48,9 +49,10 @@ OPTIONS:
   --json                Output AI-optimized structured JSON
   --compact             Emit token-optimized compact output (<250 tokens for LLM context)
   --flat                Emit unindented single-line JSON (saves 25-30% token budget)
-  --failures, --errors  Filter turns with non-zero exit code, tool errors, or anomalies
+  --failures, --errors  Filter turns with non-zero exit code, tool errors, or anomalies (transcript: failed steps only)
   --tools               Filter turns containing tool executions
-  --tool <name>         Filter turns invoking a specific tool (e.g. run_command)
+  --tool <name>         Filter turns invoking a specific tool (e.g. run_command); transcript: keep these steps, comma-separated
+  --dialogue            transcript: only the conversation (what people said, what the agent said and posted), in order
   --agent <name>        Filter turns by agent name (e.g. phoenix-twin, agent-builder)
   --last <num>          Tail the last N chronological turns
   --turn <num>          Inspect a specific turn by 1-based index
@@ -58,7 +60,7 @@ OPTIONS:
   --force               Force overwrite existing skill files/symlinks
   --dry-run             Preview install-skill actions without writing to disk
   --markdown            Output GitHub/GitLab Markdown report
-  --verbose, -v         Include verbose details (e.g. tool output previews)
+  --verbose, -v         Include verbose details (transcript: the whole prompt and a line per model call)
   --no-color            Disable ANSI color codes
   --limit <num>         Number of items to fetch (for sessions command, default: 10)
   --interval <sec>      Polling interval in seconds for watch command (default: 2.0)
@@ -324,6 +326,86 @@ export async function runContext(
 }
 
 
+export interface TranscriptFlags {
+  json?: boolean;
+  flat?: boolean;
+  markdown?: boolean;
+  dialogue?: boolean;
+  failures?: boolean;
+  /** `--tool`: names of tools to keep, comma-separated. */
+  toolName?: string;
+  /** `--tool-input` / `--cmd`: not a filter of the transcript; refused so that it is not silently ignored. */
+  toolInput?: string;
+  agent?: string;
+  last?: string;
+  turn?: string;
+  verbose?: boolean;
+  noColor?: boolean;
+}
+
+/** A positive whole number from a flag; undefined when the flag is absent; null when it is not one. */
+function positiveInteger(value: string | undefined): number | undefined | null {
+  if (value === undefined) {
+    return undefined;
+  }
+  return /^[1-9]\d*$/.test(value.trim()) ? parseInt(value, 10) : null;
+}
+
+/**
+ * Prints what was asked and what came back in a thread, whole and in order: every step's request and response (the steps view), or
+ * only the conversation (`--dialogue`). Flags are checked before Phoenix is asked, and a flag that cannot apply is refused rather
+ * than ignored: an answer to another question would look like the answer.
+ */
+export async function runTranscript(threadId: string, config: Config, flags: TranscriptFlags): Promise<number> {
+  const tools = (flags.toolName ?? "")
+    .split(",")
+    .map((name) => name.trim())
+    .filter((name) => name !== "");
+  if (flags.toolInput) {
+    console.error("Error: --tool-input (--cmd) does not apply to 'transcript': keep the steps of some tools with --tool instead.");
+    return 1;
+  }
+  if (flags.dialogue && (tools.length > 0 || flags.failures)) {
+    console.error("Error: --dialogue shows the conversation as it happened; --tool and --failures filter steps, so they do not apply to it.");
+    return 1;
+  }
+  const turn = positiveInteger(flags.turn);
+  const last = positiveInteger(flags.last);
+  if (turn === null || last === null) {
+    console.error(`Error: --${turn === null ? "turn" : "last"} must be a positive whole number.`);
+    return 1;
+  }
+
+  const telemetry = new ThreadQueryEngine().filter(await fetchThreadTelemetry(config, threadId), {
+    agentFilter: flags.agent,
+    lastN: last,
+    targetTurn: turn,
+  });
+  const transcript = new TranscriptBuilder().build(telemetry, { verbose: flags.verbose, tools, failuresOnly: flags.failures });
+  const renderer = new TranscriptRenderer(!flags.noColor);
+  const indent = flags.flat ? 0 : 2;
+
+  if (flags.dialogue) {
+    const lines = extractDialogue(transcript);
+    console.log(
+      flags.json
+        ? renderer.dialogueJson(transcript, lines, indent)
+        : flags.markdown
+          ? renderer.dialogueMarkdown(transcript, lines)
+          : renderer.dialogueTerminal(transcript, lines),
+    );
+  } else {
+    console.log(
+      flags.json
+        ? renderer.json(transcript, indent)
+        : flags.markdown
+          ? renderer.markdown(transcript, { verbose: flags.verbose })
+          : renderer.terminal(transcript, { verbose: flags.verbose }),
+    );
+  }
+  return 0;
+}
+
 export async function runSessions(config: Config, limit = 10): Promise<number> {
   const sessions: PhoenixSession[] = await clientFor(config).listSessions(config.project, limit);
   const sourceLabel = config.endpoint;
@@ -562,6 +644,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     force: { type: "boolean" as const, default: false },
     "dry-run": { type: "boolean" as const, default: false },
     markdown: { type: "boolean" as const, default: false },
+    dialogue: { type: "boolean" as const, default: false },
     verbose: { type: "boolean" as const, short: "v", default: false },
     "no-color": { type: "boolean" as const, default: false },
     limit: { type: "string" as const, default: "10" },
@@ -688,6 +771,26 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
           flat: values.flat,
           json: isJsonPreferred,
           compact: isCompactPreferred,
+          noColor: values["no-color"],
+        });
+      }
+      case "transcript": {
+        if (!targetId) {
+          console.error("Error: 'transcript' requires a thread_id argument.");
+          return 1;
+        }
+        return await runTranscript(targetId, config, {
+          json: isJsonPreferred,
+          flat: values.flat,
+          markdown: values.markdown,
+          dialogue: values.dialogue,
+          failures: values.failures || values.errors,
+          toolName: values.tool,
+          toolInput: values["tool-input"] || values.cmd,
+          agent: values.agent,
+          last: values.last,
+          turn: values.turn,
+          verbose: values.verbose,
           noColor: values["no-color"],
         });
       }
